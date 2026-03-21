@@ -192,11 +192,14 @@ This importer is meant for Gaussian Splatting style assets, not generic point cl
 - The shader work in this plugin was developed with reference to [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting). Thanks to 2Retr0 for publishing that project.
 - The upstream `2Retr0/GodotGaussianSplatting` repository is published under the MIT License. If you reuse or redistribute closely related derivative work, review and retain the relevant upstream license notice.
 - The radix sort shader files also retain their own upstream attribution headers, as documented in the shader sources.
+- Multiview/XR stereo rendering support was developed with reference to [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) (Single Pass Instanced/Multiview support for aras-p's Unity Gaussian Splatting).
 
 ## References
 
 - [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)
 - [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://arxiv.org/abs/2308.04079)
+- [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR reference
+- [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — Center-eye sorting strategy reference
 
 ## License
 

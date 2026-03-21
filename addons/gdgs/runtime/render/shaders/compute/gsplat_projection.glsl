@@ -5,7 +5,8 @@
 // culling uses an expanded clip-space margin so that splats near the
 // primary eye's frustum edge are not discarded when they fall inside the
 // secondary eye's FOV due to IPD offset.  Sorting uses only the primary
-// (left) eye depth so it runs once for both views.
+// (left) eye depth — averaged with the right eye's depth in stereo for
+// a center-eye sort key — so it runs once for both views.
 // The right eye shares the 2D covariance from the left eye and only
 // recomputes clip position + depth (the IPD-induced difference in
 // screen-space covariance is negligible for typical stereo baselines).
@@ -248,9 +249,11 @@ void main() {
 	// --- RIGHT EYE PROJECTION (stereo only) ---
 	// Copy left eye data and replace clip position + depth. The 2D covariance
 	// difference between eyes is negligible for typical IPD.
+	float clip_w_right = clip_pos.w; // default to left eye for mono
 	if (view_count >= 2) {
 		vec4 view_pos_right = view_matrix_right * world_pos;
 		vec4 clip_pos_right = projection_matrix_right * view_pos_right;
+		clip_w_right = clip_pos_right.w;
 		vec3 ndc_pos_right = clip_pos_right.xyz / clip_pos_right.w;
 		vec2 image_pos_right = ((ndc_pos_right.xy + 1.0)*0.5 - vec2(1,0.75)*(1.0 - time_factor)) * (dims - 1);
 
@@ -264,8 +267,11 @@ void main() {
 	// --- GAUSSIAN DUPLICATION ---
 	// Use clip-space w as a monotonic distance proxy so ordering stays front-to-back
 	// even when the renderer uses reverse-z projection.
-	// Sort key uses primary/left eye depth — order is consistent across both eyes.
-	float view_depth = max(0.0, clip_pos.w);
+	// In stereo mode, average left and right eye depths for a center-eye
+	// sort key that is equally fair to both views.  Inspired by Nebula
+	// (arxiv:2512.20495) which uses a virtual camera between both eyes
+	// for shared sorting.
+	float view_depth = max(0.0, (clip_pos.w + clip_w_right) * 0.5);
 	float depth01 = view_depth / (1.0 + view_depth);
 	uint depth = uint(depth01 * 65535.0) & 0xFFFF;
 	for (uint y = rect_bounds.y; y < rect_bounds.w; ++y)
