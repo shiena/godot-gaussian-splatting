@@ -22,6 +22,12 @@ enum DebugView {
 	DEPTH_REJECT_MASK
 }
 
+enum CompositeMethod {
+	AUTO,
+	COMPUTE,
+	RASTER
+}
+
 @export_range(0.0, 1.0, 0.001) var alpha_cutoff := 0.01
 @export_range(0.0, 1.0, 0.001) var depth_bias := 0.05
 @export_range(0.0, 1.0, 0.001) var depth_test_min_alpha := 0.05
@@ -34,10 +40,17 @@ enum DebugView {
 	get:
 		return _display_mode
 @export_enum("Composite", "GS Alpha", "GS Color", "GS Depth", "Scene Depth", "Depth Reject Mask") var debug_view: int = DebugView.COMPOSITE
+## Composite method. Auto selects Compute on Forward+ and Raster on Mobile.
+@export_enum("Auto", "Compute", "Raster") var composite_method: int = CompositeMethod.AUTO
 
 var rd: RenderingDevice
+# Compute composite (Forward+)
 var shader: RID
 var pipeline: RID
+# Raster composite (Mobile-compatible)
+var raster_shader: RID
+var raster_pipeline: RID
+# Shared
 var depth_sampler: RID
 var fallback_depth_texture: RID
 
@@ -51,7 +64,7 @@ var _overlay_pending_texture_rid := RID()
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 	access_resolved_depth = true
-	RenderingServer.call_on_render_thread(initialize_compute_shader)
+	RenderingServer.call_on_render_thread(_initialize_shaders)
 
 func _notification(what: int) -> void:
 	if what != NOTIFICATION_PREDELETE:
@@ -82,16 +95,29 @@ func _notification(what: int) -> void:
 			rd.free_rid(pipeline)
 		if shader.is_valid():
 			rd.free_rid(shader)
+		if raster_pipeline.is_valid():
+			rd.free_rid(raster_pipeline)
+		if raster_shader.is_valid():
+			rd.free_rid(raster_shader)
 		if depth_sampler.is_valid():
 			rd.free_rid(depth_sampler)
 	fallback_depth_texture = RID()
 	pipeline = RID()
 	shader = RID()
+	raster_pipeline = RID()
+	raster_shader = RID()
 	depth_sampler = RID()
 
 func _render_callback(_effect_callback_type: int, render_data: RenderData) -> void:
 	var is_direct_texture_mode := display_mode == DisplayMode.DIRECT_TEXTURE
-	if not is_direct_texture_mode and (not rd or not shader.is_valid() or not pipeline.is_valid()):
+	var resolved := _resolve_composite_method()
+	var has_valid_pipeline := false
+	if resolved == CompositeMethod.RASTER:
+		# Raster pipeline is lazily created; shader alone is enough here.
+		has_valid_pipeline = rd != null and raster_shader.is_valid()
+	else:
+		has_valid_pipeline = rd != null and shader.is_valid() and pipeline.is_valid()
+	if not is_direct_texture_mode and not has_valid_pipeline:
 		_queue_direct_texture_overlay_state(false, RID())
 		return
 
@@ -141,6 +167,18 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		return
 
 	# Composite each view
+	if resolved == CompositeMethod.RASTER:
+		_composite_raster(view_count, gsplat_views, scene_buffers, camera_data_array, size)
+	else:
+		_composite_compute(view_count, gsplat_views, scene_buffers, camera_data_array, size)
+
+	if not is_direct_texture_mode:
+		_queue_direct_texture_overlay_state(false, RID())
+
+# ---------------------------------------------------------------------------
+# Composite: Compute path (Forward+)
+# ---------------------------------------------------------------------------
+func _composite_compute(view_count: int, gsplat_views: Array, scene_buffers: RenderSceneBuffersRD, camera_data_array: Array, size: Vector2i) -> void:
 	var x_groups: int = int(ceili(size.x / float(WORKGROUP_SIZE)))
 	var y_groups: int = int(ceili(size.y / float(WORKGROUP_SIZE)))
 
@@ -212,9 +250,139 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 		rd.compute_list_end()
 
-	if not is_direct_texture_mode:
-		_queue_direct_texture_overlay_state(false, RID())
+# ---------------------------------------------------------------------------
+# Composite: Raster path (Mobile-compatible)
+# ---------------------------------------------------------------------------
+func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: RenderSceneBuffersRD, camera_data_array: Array, size: Vector2i) -> void:
+	for view in view_count:
+		var gsplat_texture: RID = gsplat_views[view].get("color_alpha_texture", RID())
+		var gsplat_depth_texture: RID = gsplat_views[view].get("depth_texture", RID())
+		if not gsplat_texture.is_valid() or not gsplat_depth_texture.is_valid():
+			continue
 
+		var scene_tex: RID = scene_buffers.get_color_layer(view)
+		if not scene_tex.is_valid() or not depth_sampler.is_valid():
+			continue
+
+		var use_scene_depth := _debug_view_needs_scene_depth(debug_view)
+		var scene_depth_tex: RID = _get_scene_depth_texture(scene_buffers, view)
+		if use_scene_depth and not scene_depth_tex.is_valid():
+			continue
+		if not scene_depth_tex.is_valid():
+			scene_depth_tex = fallback_depth_texture
+		if not scene_depth_tex.is_valid():
+			continue
+
+		_ensure_raster_pipeline(scene_tex)
+		if not raster_pipeline.is_valid():
+			continue
+
+		var push_constants := PackedFloat32Array([
+			size.x,
+			size.y,
+			alpha_cutoff,
+			depth_bias,
+			depth_test_min_alpha,
+			float(debug_view),
+			1.0 if use_scene_depth else 0.0,
+			0.0
+		] + _projection_to_column_major_floats(camera_data_array[view]["projection"].inverse()))
+
+		var gsplat_uniform := RDUniform.new()
+		gsplat_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		gsplat_uniform.binding = 0
+		gsplat_uniform.add_id(depth_sampler)
+		gsplat_uniform.add_id(gsplat_texture)
+
+		var gsplat_depth_uniform := RDUniform.new()
+		gsplat_depth_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		gsplat_depth_uniform.binding = 1
+		gsplat_depth_uniform.add_id(depth_sampler)
+		gsplat_depth_uniform.add_id(gsplat_depth_texture)
+
+		var scene_depth_uniform := RDUniform.new()
+		scene_depth_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+		scene_depth_uniform.binding = 2
+		scene_depth_uniform.add_id(depth_sampler)
+		scene_depth_uniform.add_id(scene_depth_tex)
+
+		var uniform_set: RID = UniformSetCacheRD.get_cache(raster_shader, 0, [
+			gsplat_uniform,
+			gsplat_depth_uniform,
+			scene_depth_uniform
+		])
+
+		var fb: RID = rd.framebuffer_create([scene_tex])
+		var draw_list: int = rd.draw_list_begin(
+			fb,
+			RenderingDevice.INITIAL_ACTION_LOAD,
+			RenderingDevice.FINAL_ACTION_STORE,
+			RenderingDevice.INITIAL_ACTION_DISCARD,
+			RenderingDevice.FINAL_ACTION_DISCARD
+		)
+		rd.draw_list_bind_render_pipeline(draw_list, raster_pipeline)
+		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
+		rd.draw_list_set_push_constant(
+			draw_list,
+			push_constants.to_byte_array(),
+			push_constants.size() * 4
+		)
+		rd.draw_list_draw(draw_list, false, 1, 3)
+		rd.draw_list_end()
+		rd.free_rid(fb)
+
+# ---------------------------------------------------------------------------
+# Raster pipeline (lazy init — needs framebuffer format from a scene texture)
+# ---------------------------------------------------------------------------
+func _ensure_raster_pipeline(scene_tex: RID) -> void:
+	if raster_pipeline.is_valid():
+		return
+	if not raster_shader.is_valid():
+		return
+
+	var fb: RID = rd.framebuffer_create([scene_tex])
+	var fb_format: int = rd.framebuffer_get_format(fb)
+	rd.free_rid(fb)
+
+	var blend := RDPipelineColorBlendStateAttachment.new()
+	blend.enable_blend = true
+	blend.src_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+	blend.dst_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+	blend.color_blend_op = RenderingDevice.BLEND_OP_ADD
+	blend.src_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+	blend.dst_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+	blend.alpha_blend_op = RenderingDevice.BLEND_OP_ADD
+
+	var color_blend := RDPipelineColorBlendState.new()
+	color_blend.attachments.push_back(blend)
+
+	raster_pipeline = rd.render_pipeline_create(
+		raster_shader,
+		fb_format,
+		-1, # no vertex format — vertices generated from gl_VertexIndex
+		RenderingDevice.RENDER_PRIMITIVE_TRIANGLES,
+		RDPipelineRasterizationState.new(),
+		RDPipelineMultisampleState.new(),
+		RDPipelineDepthStencilState.new(),
+		color_blend
+	)
+
+# ---------------------------------------------------------------------------
+# Composite method resolution
+# ---------------------------------------------------------------------------
+func _resolve_composite_method() -> int:
+	if composite_method != CompositeMethod.AUTO:
+		return composite_method
+	var rendering_method: String = str(ProjectSettings.get_setting(
+		"rendering/renderer/rendering_method", "forward_plus"
+	))
+	if rendering_method == "mobile":
+		return CompositeMethod.RASTER
+	return CompositeMethod.COMPUTE
+
+# ---------------------------------------------------------------------------
+# Camera helpers
+# ---------------------------------------------------------------------------
 func _get_camera_data(scene_data: RenderSceneDataRD, view: int) -> Dictionary:
 	if scene_data == null:
 		return {}
@@ -271,17 +439,28 @@ func _get_depth_capture_alpha() -> float:
 func _debug_view_needs_scene_depth(view: int) -> bool:
 	return view == DebugView.COMPOSITE or view == DebugView.SCENE_DEPTH or view == DebugView.DEPTH_REJECT_MASK
 
-func initialize_compute_shader() -> void:
+# ---------------------------------------------------------------------------
+# Shader / pipeline initialisation (called on render thread)
+# ---------------------------------------------------------------------------
+func _initialize_shaders() -> void:
 	rd = RenderingServer.get_rendering_device()
 	if not rd:
 		return
 
-	var glsl_file: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite.glsl")
-	if glsl_file == null:
-		return
+	# Only load the composite shader for the active method to avoid
+	# allocating GPU resources that will never be used.
+	var resolved := _resolve_composite_method()
+	if resolved == CompositeMethod.RASTER:
+		var raster_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite_raster.glsl")
+		if raster_glsl != null:
+			raster_shader = rd.shader_create_from_spirv(raster_glsl.get_spirv())
+	else:
+		var compute_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite.glsl")
+		if compute_glsl != null:
+			shader = rd.shader_create_from_spirv(compute_glsl.get_spirv())
+			pipeline = rd.compute_pipeline_create(shader)
 
-	shader = rd.shader_create_from_spirv(glsl_file.get_spirv())
-	pipeline = rd.compute_pipeline_create(shader)
+	# Shared resources
 	var sampler_state := RDSamplerState.new()
 	depth_sampler = rd.sampler_create(sampler_state)
 	fallback_depth_texture = _create_fallback_depth_texture()
@@ -302,6 +481,9 @@ func _create_fallback_depth_texture() -> RID:
 		[PackedFloat32Array([1.0]).to_byte_array()]
 	)
 
+# ---------------------------------------------------------------------------
+# Direct texture overlay (debug)
+# ---------------------------------------------------------------------------
 func _queue_direct_texture_overlay_state(visible: bool, texture_rid: RID) -> void:
 	var next_visible := visible and texture_rid.is_valid()
 	var next_texture_rid := texture_rid if next_visible else RID()
