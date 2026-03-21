@@ -29,11 +29,12 @@ class RenderState:
 
 	var texture_size := Vector2i.ONE
 	var tile_dims := Vector2i.ONE
+	## 1 = mono, 2 = stereo. Changing this triggers a GPU rebuild.
 	var view_count := 1
-	var camera_projection: Projection
-	var camera_view: Projection
-	var camera_projection_right: Projection
-	var camera_view_right: Projection
+	var camera_projection := Projection.IDENTITY
+	var camera_view := Projection.IDENTITY
+	var camera_projection_right := Projection.IDENTITY
+	var camera_view_right := Projection.IDENTITY
 	var camera_world_position := Vector3.ZERO
 	var camera_world_position_right := Vector3.ZERO
 	var depth_capture_alpha := 0.5

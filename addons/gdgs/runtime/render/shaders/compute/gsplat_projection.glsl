@@ -1,3 +1,15 @@
+// Multiview gaussian splat projection.
+//
+// Mono (view_count=1): identical to single-view — no stereo overhead.
+// Stereo (view_count=2): projects both eyes in one dispatch. Sorting uses
+// only the primary (left) eye depth so it runs once for both views.
+// The right eye shares the 2D covariance from the left eye and only
+// recomputes clip position + depth (the IPD-induced difference in
+// screen-space covariance is negligible for typical stereo baselines).
+//
+// culled_buffer layout: interleaved [left_0, right_0, left_1, right_1, ...]
+//   index = splat_id * view_count + eye_index
+
 #[compute]
 #version 460
 

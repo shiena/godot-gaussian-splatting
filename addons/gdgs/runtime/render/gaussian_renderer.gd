@@ -49,7 +49,8 @@ func render_for_compositor_multiview(
 	var safe_size := Vector2i(maxi(texture_size.x, 1), maxi(texture_size.y, 1))
 	var state = state_cache.get_or_create_render_state(safe_size)
 
-	# Update view_count — triggers GPU rebuild if changed
+	# Update view_count — triggers GPU rebuild if changed (resizes culled_buffer
+	# and creates per-view render textures / descriptor sets).
 	if state.view_count != view_count:
 		state.view_count = view_count
 		state.needs_gpu_rebuild = true
@@ -59,12 +60,17 @@ func render_for_compositor_multiview(
 	_update_camera(state, primary["transform"], primary["projection"], primary["world_position"])
 	state.depth_capture_alpha = clampf(depth_capture_alpha, 0.0, 1.0)
 
-	# Update right eye camera (stereo)
+	# Update right eye camera (stereo).
+	# For mono, reset to identity so the UBO contains clean data.
 	if view_count >= 2:
 		var right: Dictionary = camera_data_array[1]
 		state.camera_view_right = Projection(right["transform"].affine_inverse())
 		state.camera_projection_right = right["projection"]
 		state.camera_world_position_right = right["world_position"]
+	else:
+		state.camera_view_right = Projection.IDENTITY
+		state.camera_projection_right = Projection.IDENTITY
+		state.camera_world_position_right = Vector3.ZERO
 
 	if state.context == null or state.needs_gpu_rebuild:
 		state_cache.rebuild_gpu_state(state, point_count, scene_registry.get_instance_count())
