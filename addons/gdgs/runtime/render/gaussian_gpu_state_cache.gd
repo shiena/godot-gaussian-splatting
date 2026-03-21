@@ -44,6 +44,7 @@ class RenderState:
 	var shaders: Dictionary = {}
 	var pipelines: Dictionary = {}
 	var descriptors: Dictionary = {}
+	var render_sets: Array = [] # Per-view render descriptor set RIDs
 
 var _render_states: Dictionary = {}
 var _render_state_lru: Array = []
@@ -117,8 +118,23 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 	state.descriptors["uniforms"] = state.context.create_uniform_buffer(UBO_SIZE)
 	state.descriptors["tile_bounds"] = state.context.create_storage_buffer(state.tile_dims.x * state.tile_dims.y * 2 * 4)
 	state.descriptors["tile_splat_pos"] = state.context.create_storage_buffer(4 * 4)
-	state.descriptors["render_texture"] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
-	state.descriptors["depth_texture"] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
+
+	# Create per-view render/depth textures and descriptor sets
+	state.render_sets.clear()
+	for v in range(state.view_count):
+		var rt_key := "render_texture_%d" % v
+		var dt_key := "depth_texture_%d" % v
+		state.descriptors[rt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
+		state.descriptors[dt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
+		var render_set_v: RID = state.context.create_descriptor_set([
+			state.descriptors["culled_splats"],
+			state.descriptors["sort_values"],
+			state.descriptors["tile_bounds"],
+			state.descriptors["tile_splat_pos"],
+			state.descriptors[rt_key],
+			state.descriptors[dt_key]
+		], state.shaders["render"], 0)
+		state.render_sets.append(render_set_v)
 
 	var projection_set: RID = state.context.create_descriptor_set([
 		state.descriptors["splats"],
@@ -153,21 +169,12 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 		state.descriptors["tile_bounds"]
 	], state.shaders["boundaries"], 0)
 
-	var render_set: RID = state.context.create_descriptor_set([
-		state.descriptors["culled_splats"],
-		state.descriptors["sort_values"],
-		state.descriptors["tile_bounds"],
-		state.descriptors["tile_splat_pos"],
-		state.descriptors["render_texture"],
-		state.descriptors["depth_texture"]
-	], state.shaders["render"], 0)
-
 	state.pipelines["gsplat_projection"] = state.context.create_pipeline([ceili(point_count / 256.0), 1, 1], [projection_set], state.shaders["projection"])
 	state.pipelines["radix_sort_upsweep"] = state.context.create_pipeline([], [radix_upsweep_set], state.shaders["radix_upsweep"])
 	state.pipelines["radix_sort_spine"] = state.context.create_pipeline([RADIX, 1, 1], [radix_spine_set], state.shaders["radix_spine"])
 	state.pipelines["radix_sort_downsweep"] = state.context.create_pipeline([], [radix_downsweep_set], state.shaders["radix_downsweep"])
 	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([], [boundaries_set], state.shaders["boundaries"])
-	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [render_set], state.shaders["render"])
+	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [state.render_sets[0]], state.shaders["render"])
 
 	state.needs_gpu_rebuild = false
 	state.needs_splat_upload = true
@@ -195,6 +202,7 @@ func cleanup_state(state) -> void:
 	state.shaders.clear()
 	state.pipelines.clear()
 	state.descriptors.clear()
+	state.render_sets.clear()
 	state.needs_gpu_rebuild = true
 	state.needs_splat_upload = true
 	state.needs_instance_upload = true

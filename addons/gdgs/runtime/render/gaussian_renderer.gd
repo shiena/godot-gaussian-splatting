@@ -6,6 +6,7 @@ const RenderingDeviceContext := preload("res://addons/gdgs/runtime/render/gaussi
 const RADIX := 256
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
 
+## Single-view render (backward-compatible). Wraps multiview with view_count=1.
 func render_for_compositor(
 	state_cache: GaussianGpuStateCache,
 	scene_registry: GaussianSceneRegistry,
@@ -15,6 +16,24 @@ func render_for_compositor(
 	camera_world_position: Vector3,
 	depth_capture_alpha: float = 0.5
 ) -> Dictionary:
+	var result := render_for_compositor_multiview(
+		state_cache, scene_registry, texture_size,
+		[{"transform": camera_transform, "projection": camera_projection, "world_position": camera_world_position}],
+		depth_capture_alpha
+	)
+	var views: Array = result.get("views", [])
+	return views[0] if views.size() > 0 else {}
+
+## Multiview render. Runs projection + sort once, then renders per eye.
+## camera_data_array: Array of {"transform": Transform3D, "projection": Projection, "world_position": Vector3}
+## Returns {"views": [{"color_alpha_texture": RID, "depth_texture": RID}, ...]}
+func render_for_compositor_multiview(
+	state_cache: GaussianGpuStateCache,
+	scene_registry: GaussianSceneRegistry,
+	texture_size: Vector2i,
+	camera_data_array: Array,
+	depth_capture_alpha: float = 0.5
+) -> Dictionary:
 	state_cache.flush_pending_cleanup()
 
 	if not scene_registry.has_gpu_data():
@@ -22,11 +41,30 @@ func render_for_compositor(
 			state_cache.cleanup_all()
 		return {}
 
+	var view_count := camera_data_array.size()
+	if view_count <= 0 or view_count > 2:
+		return {}
+
 	var point_count := scene_registry.get_point_count()
 	var safe_size := Vector2i(maxi(texture_size.x, 1), maxi(texture_size.y, 1))
 	var state = state_cache.get_or_create_render_state(safe_size)
-	_update_camera(state, camera_transform, camera_projection, camera_world_position)
+
+	# Update view_count — triggers GPU rebuild if changed
+	if state.view_count != view_count:
+		state.view_count = view_count
+		state.needs_gpu_rebuild = true
+
+	# Update primary (left) eye camera
+	var primary: Dictionary = camera_data_array[0]
+	_update_camera(state, primary["transform"], primary["projection"], primary["world_position"])
 	state.depth_capture_alpha = clampf(depth_capture_alpha, 0.0, 1.0)
+
+	# Update right eye camera (stereo)
+	if view_count >= 2:
+		var right: Dictionary = camera_data_array[1]
+		state.camera_view_right = Projection(right["transform"].affine_inverse())
+		state.camera_projection_right = right["projection"]
+		state.camera_world_position_right = right["world_position"]
 
 	if state.context == null or state.needs_gpu_rebuild:
 		state_cache.rebuild_gpu_state(state, point_count, scene_registry.get_instance_count())
@@ -39,12 +77,17 @@ func render_for_compositor(
 		state_cache.upload_instance_transforms(state, scene_registry.get_instance_transforms_byte())
 
 	_rasterize_state(state, point_count)
-	if state.descriptors.has("render_texture") and state.descriptors.has("depth_texture"):
-		return {
-			"color_alpha_texture": state.descriptors["render_texture"].rid,
-			"depth_texture": state.descriptors["depth_texture"].rid
-		}
-	return {}
+
+	var views := []
+	for v in range(state.view_count):
+		var rt_key := "render_texture_%d" % v
+		var dt_key := "depth_texture_%d" % v
+		if state.descriptors.has(rt_key) and state.descriptors.has(dt_key):
+			views.append({
+				"color_alpha_texture": state.descriptors[rt_key].rid,
+				"depth_texture": state.descriptors[dt_key].rid
+			})
+	return {"views": views} if views.size() == state.view_count else {}
 
 func _rasterize_state(state, point_count: int) -> void:
 	if state.context == null:
@@ -70,10 +113,12 @@ func _rasterize_state(state, point_count: int) -> void:
 	state.context.device.buffer_clear(state.descriptors["histogram"].rid, 0, 4 + 4 * RADIX * 4)
 	state.context.device.buffer_clear(state.descriptors["tile_bounds"].rid, 0, state.tile_dims.x * state.tile_dims.y * 2 * 4)
 
+	# Projection pass — runs once for all views
 	var compute_list: int = state.context.compute_list_begin()
 	state.pipelines["gsplat_projection"].call(state.context, compute_list, PackedByteArray())
 	state.context.compute_list_end()
 
+	# Radix sort — runs once using primary eye depth
 	compute_list = state.context.compute_list_begin()
 	for radix_shift_pass in range(4):
 		var sort_push_constant := RenderingDeviceContext.create_push_constant([
@@ -86,17 +131,22 @@ func _rasterize_state(state, point_count: int) -> void:
 		state.pipelines["radix_sort_downsweep"].call(state.context, compute_list, sort_push_constant, [], state.descriptors["grid_dimensions"].rid, 0)
 	state.context.compute_list_end()
 
+	# Boundaries pass — runs once
 	compute_list = state.context.compute_list_begin()
 	state.pipelines["gsplat_boundaries"].call(state.context, compute_list, PackedByteArray(), [], state.descriptors["grid_dimensions"].rid, 3 * 4)
 	state.context.compute_list_end()
 
-	compute_list = state.context.compute_list_begin()
-	state.pipelines["gsplat_render"].call(
-		state.context,
-		compute_list,
-		RenderingDeviceContext.create_push_constant([0.0, -1, state.depth_capture_alpha, 0.0])
-	)
-	state.context.compute_list_end()
+	# Render pass — runs once per eye with per-view output textures
+	for eye_index in range(state.view_count):
+		compute_list = state.context.compute_list_begin()
+		var render_push_constant := RenderingDeviceContext.create_push_constant([
+			0.0, -1, state.depth_capture_alpha, eye_index, state.view_count, 0, 0, 0
+		])
+		state.pipelines["gsplat_render"].call(
+			state.context, compute_list, render_push_constant,
+			[state.render_sets[eye_index]]
+		)
+		state.context.compute_list_end()
 
 func _update_camera(state, camera_transform: Transform3D, camera_projection: Projection, camera_world_position: Vector3) -> void:
 	state.camera_view = Projection(camera_transform.affine_inverse())

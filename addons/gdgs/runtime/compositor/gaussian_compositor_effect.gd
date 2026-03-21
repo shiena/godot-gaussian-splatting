@@ -111,37 +111,44 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		_queue_direct_texture_overlay_state(false, RID())
 		return
 
-	var x_groups: int = 0
-	var y_groups: int = 0
-	if not is_direct_texture_mode:
-		x_groups = int(ceili(size.x / float(WORKGROUP_SIZE)))
-		y_groups = int(ceili(size.y / float(WORKGROUP_SIZE)))
+	var view_count: int = scene_buffers.get_view_count()
 
-	var direct_texture_visible := false
-	for view in scene_buffers.get_view_count():
+	# Collect camera data for all views
+	var camera_data_array: Array = []
+	for view in view_count:
 		var camera_data := _get_camera_data(scene_data, view)
 		if camera_data.is_empty():
-			continue
+			_queue_direct_texture_overlay_state(false, RID())
+			return
+		camera_data_array.append(camera_data)
 
-		var gsplat_result: Dictionary = manager.render_for_compositor(
-			size,
-			camera_data["transform"],
-			camera_data["projection"],
-			camera_data["world_position"],
-			_get_depth_capture_alpha()
-		)
-		if gsplat_result.is_empty():
-			continue
+	# Render all views at once (projection + sort once, render per eye)
+	var gsplat_result: Dictionary = manager.render_for_compositor_multiview(
+		size, camera_data_array, _get_depth_capture_alpha()
+	)
+	var gsplat_views: Array = gsplat_result.get("views", [])
+	if gsplat_views.size() != view_count:
+		_queue_direct_texture_overlay_state(false, RID())
+		return
 
-		var gsplat_texture: RID = gsplat_result.get("color_alpha_texture", RID())
-		var gsplat_depth_texture: RID = gsplat_result.get("depth_texture", RID())
+	# Direct texture mode: show first view only
+	if is_direct_texture_mode:
+		var gsplat_texture: RID = gsplat_views[0].get("color_alpha_texture", RID())
+		if gsplat_texture.is_valid():
+			_queue_direct_texture_overlay_state(true, gsplat_texture)
+		else:
+			_queue_direct_texture_overlay_state(false, RID())
+		return
+
+	# Composite each view
+	var x_groups: int = int(ceili(size.x / float(WORKGROUP_SIZE)))
+	var y_groups: int = int(ceili(size.y / float(WORKGROUP_SIZE)))
+
+	for view in view_count:
+		var gsplat_texture: RID = gsplat_views[view].get("color_alpha_texture", RID())
+		var gsplat_depth_texture: RID = gsplat_views[view].get("depth_texture", RID())
 		if not gsplat_texture.is_valid() or not gsplat_depth_texture.is_valid():
 			continue
-
-		if is_direct_texture_mode:
-			_queue_direct_texture_overlay_state(true, gsplat_texture)
-			direct_texture_visible = true
-			break
 
 		var scene_tex: RID = scene_buffers.get_color_layer(view)
 		if not scene_tex.is_valid() or not depth_sampler.is_valid():
@@ -165,7 +172,7 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 			float(debug_view),
 			1.0 if use_scene_depth else 0.0,
 			0.0
-		] + _projection_to_column_major_floats(camera_data["projection"].inverse()))
+		] + _projection_to_column_major_floats(camera_data_array[view]["projection"].inverse()))
 
 		var scene_uniform := RDUniform.new()
 		scene_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
@@ -205,9 +212,7 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 		rd.compute_list_end()
 
-	if is_direct_texture_mode and not direct_texture_visible:
-		_queue_direct_texture_overlay_state(false, RID())
-	elif not is_direct_texture_mode:
+	if not is_direct_texture_mode:
 		_queue_direct_texture_overlay_state(false, RID())
 
 func _get_camera_data(scene_data: RenderSceneDataRD, view: int) -> Dictionary:
@@ -220,8 +225,15 @@ func _get_camera_data(scene_data: RenderSceneDataRD, view: int) -> Dictionary:
 	var camera_projection: Projection = scene_data.get_cam_projection()
 	var world_position: Vector3 = camera_transform.origin
 
+	# Use per-view projection when available (XR stereo)
+	if scene_data.has_method("get_view_projection"):
+		camera_projection = scene_data.get_view_projection(view)
+
+	# Apply eye offset to transform and world position (XR stereo)
 	if scene_data.has_method("get_view_eye_offset"):
-		world_position += scene_data.get_view_eye_offset(view)
+		var eye_offset: Vector3 = scene_data.get_view_eye_offset(view)
+		camera_transform.origin += eye_offset
+		world_position = camera_transform.origin
 
 	return {
 		"transform": camera_transform,
