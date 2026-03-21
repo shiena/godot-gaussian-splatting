@@ -1,14 +1,20 @@
 // Multiview gaussian splat projection.
 //
 // Mono (view_count=1): identical to single-view — no stereo overhead.
-// Stereo (view_count=2): projects both eyes in one dispatch. Sorting uses
-// only the primary (left) eye depth so it runs once for both views.
+// Stereo (view_count=2): projects both eyes in one dispatch. Frustum
+// culling uses an expanded clip-space margin so that splats near the
+// primary eye's frustum edge are not discarded when they fall inside the
+// secondary eye's FOV due to IPD offset.  Sorting uses only the primary
+// (left) eye depth so it runs once for both views.
 // The right eye shares the 2D covariance from the left eye and only
 // recomputes clip position + depth (the IPD-induced difference in
 // screen-space covariance is negligible for typical stereo baselines).
 //
 // culled_buffer layout: interleaved [left_0, right_0, left_1, right_1, ...]
 //   index = splat_id * view_count + eye_index
+//
+// Reference: arghyasur1991/UnityGaussianSplatting (MIT License)
+// https://github.com/arghyasur1991/UnityGaussianSplatting
 
 #[compute]
 #version 460
@@ -181,13 +187,19 @@ void main() {
 	uint instance_id = splat_instance_ids[id];
 	mat4 model_matrix = instance_model_matrices[instance_id];
 
-	// --- FRUSTUM CULLING (primary/left eye) ---
+	// --- FRUSTUM CULLING (combined for stereo) ---
+	// In stereo mode the IPD offset can place a splat inside one eye's
+	// frustum while it sits just outside the other's.  Expanding the
+	// clip-space margin from 1.2 to 1.5 covers typical VR baselines
+	// (IPD ~63 mm) down to near-plane distances without a second
+	// frustum test, keeping the single-dispatch design intact.
 	mat3 object_linear = mat3(model_matrix);
 	mat3 world_covariance = object_linear * DECODE_COVARIANCE(splat.covariance) * transpose(object_linear);
 	vec4 world_pos = model_matrix * vec4(splat.position, 1.0);
 	vec4 view_pos = view_matrix * world_pos;
 	vec4 clip_pos = projection_matrix * view_pos;
-	vec2 view_bounds = clip_pos.ww*1.2;
+	float frustum_margin = view_count >= 2 ? 1.5 : 1.2;
+	vec2 view_bounds = clip_pos.ww * frustum_margin;
 	if (any(lessThan(clip_pos.xyz, vec3(-view_bounds, 0.0))) || any(greaterThan(clip_pos.xyz, vec3(view_bounds, clip_pos.w)))) {
 		return;
 	}
