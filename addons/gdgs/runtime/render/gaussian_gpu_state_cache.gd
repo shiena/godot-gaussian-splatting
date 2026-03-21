@@ -14,6 +14,8 @@ const FLOATS_PER_SPLAT := 60
 const FLOATS_PER_CULLED_SPLAT := 16
 const BYTES_PER_FLOAT := 4
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
+# UBO layout: vec3+float(16) + ivec2+int+int(16) + 4x mat4(256) = 288 bytes
+const UBO_SIZE := 288
 
 const SHADER_PATH_PROJECTION := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_projection.glsl"
 const SHADER_PATH_RADIX_UPSWEEP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep.glsl"
@@ -27,10 +29,13 @@ class RenderState:
 
 	var texture_size := Vector2i.ONE
 	var tile_dims := Vector2i.ONE
+	var view_count := 1
 	var camera_projection: Projection
 	var camera_view: Projection
-	var camera_push_constants := PackedByteArray()
+	var camera_projection_right: Projection
+	var camera_view_right: Projection
 	var camera_world_position := Vector3.ZERO
+	var camera_world_position_right := Vector3.ZERO
 	var depth_capture_alpha := 0.5
 	var needs_gpu_rebuild := true
 	var needs_splat_upload := false
@@ -102,14 +107,14 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 	block_dims[3] = ceili(num_sort_elements_max / 256.0)
 
 	state.descriptors["splats"] = state.context.create_storage_buffer(point_count * FLOATS_PER_SPLAT * BYTES_PER_FLOAT)
-	state.descriptors["culled_splats"] = state.context.create_storage_buffer(point_count * FLOATS_PER_CULLED_SPLAT * BYTES_PER_FLOAT)
+	state.descriptors["culled_splats"] = state.context.create_storage_buffer(point_count * state.view_count * FLOATS_PER_CULLED_SPLAT * BYTES_PER_FLOAT)
 	state.descriptors["grid_dimensions"] = state.context.create_storage_buffer(6 * 4, block_dims.to_byte_array(), RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
 	state.descriptors["histogram"] = state.context.create_storage_buffer(4 + (1 + 4 * RADIX + num_partitions * RADIX) * 4)
 	state.descriptors["sort_keys"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["sort_values"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["splat_instance_ids"] = state.context.create_storage_buffer(point_count * 4)
 	state.descriptors["instance_transforms"] = state.context.create_storage_buffer(instance_count * 16 * BYTES_PER_FLOAT)
-	state.descriptors["uniforms"] = state.context.create_uniform_buffer(8 * 4)
+	state.descriptors["uniforms"] = state.context.create_uniform_buffer(UBO_SIZE)
 	state.descriptors["tile_bounds"] = state.context.create_storage_buffer(state.tile_dims.x * state.tile_dims.y * 2 * 4)
 	state.descriptors["tile_splat_pos"] = state.context.create_storage_buffer(4 * 4)
 	state.descriptors["render_texture"] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)

@@ -25,8 +25,7 @@ func render_for_compositor(
 	var point_count := scene_registry.get_point_count()
 	var safe_size := Vector2i(maxi(texture_size.x, 1), maxi(texture_size.y, 1))
 	var state = state_cache.get_or_create_render_state(safe_size)
-	_update_camera_from_transform(state, camera_transform, camera_projection)
-	state.camera_world_position = camera_world_position
+	_update_camera(state, camera_transform, camera_projection, camera_world_position)
 	state.depth_capture_alpha = clampf(depth_capture_alpha, 0.0, 1.0)
 
 	if state.context == null or state.needs_gpu_rebuild:
@@ -38,9 +37,6 @@ func render_for_compositor(
 		state_cache.upload_splats(state, scene_registry.get_point_data_byte(), scene_registry.get_splat_instance_ids_byte())
 	if state.needs_instance_upload:
 		state_cache.upload_instance_transforms(state, scene_registry.get_instance_transforms_byte())
-
-	if state.camera_push_constants.is_empty():
-		return {}
 
 	_rasterize_state(state, point_count)
 	if state.descriptors.has("render_texture") and state.descriptors.has("depth_texture"):
@@ -54,22 +50,28 @@ func _rasterize_state(state, point_count: int) -> void:
 	if state.context == null:
 		return
 
-	var uniforms := RenderingDeviceContext.create_push_constant([
-		state.camera_world_position.x,
-		state.camera_world_position.y,
-		state.camera_world_position.z,
-		Time.get_ticks_msec() * 1e-3,
-		state.texture_size.x,
-		state.texture_size.y,
-		point_count,
-		0
-	])
-	state.context.device.buffer_update(state.descriptors["uniforms"].rid, 0, 8 * 4, uniforms)
+	var ubo_data := RenderingDeviceContext.create_buffer_data(
+		[
+			state.camera_world_position.x,
+			state.camera_world_position.y,
+			state.camera_world_position.z,
+			Time.get_ticks_msec() * 1e-3,
+			state.texture_size.x,
+			state.texture_size.y,
+			point_count,
+			state.view_count
+		]
+		+ _projection_to_column_major_floats(state.camera_view)
+		+ _projection_to_column_major_floats(state.camera_projection)
+		+ _projection_to_column_major_floats(state.camera_view_right)
+		+ _projection_to_column_major_floats(state.camera_projection_right)
+	)
+	state.context.device.buffer_update(state.descriptors["uniforms"].rid, 0, ubo_data.size(), ubo_data)
 	state.context.device.buffer_clear(state.descriptors["histogram"].rid, 0, 4 + 4 * RADIX * 4)
 	state.context.device.buffer_clear(state.descriptors["tile_bounds"].rid, 0, state.tile_dims.x * state.tile_dims.y * 2 * 4)
 
 	var compute_list: int = state.context.compute_list_begin()
-	state.pipelines["gsplat_projection"].call(state.context, compute_list, state.camera_push_constants)
+	state.pipelines["gsplat_projection"].call(state.context, compute_list, PackedByteArray())
 	state.context.compute_list_end()
 
 	compute_list = state.context.compute_list_begin()
@@ -96,14 +98,10 @@ func _rasterize_state(state, point_count: int) -> void:
 	)
 	state.context.compute_list_end()
 
-func _update_camera_from_transform(state, camera_transform: Transform3D, camera_projection: Projection) -> void:
-	var view := Projection(camera_transform.affine_inverse())
-	if view != state.camera_view or camera_projection != state.camera_projection:
-		state.camera_view = view
-		state.camera_projection = camera_projection
-		state.camera_push_constants = RenderingDeviceContext.create_push_constant(
-			_projection_to_column_major_floats(view) + _projection_to_column_major_floats(camera_projection)
-		)
+func _update_camera(state, camera_transform: Transform3D, camera_projection: Projection, camera_world_position: Vector3) -> void:
+	state.camera_view = Projection(camera_transform.affine_inverse())
+	state.camera_projection = camera_projection
+	state.camera_world_position = camera_world_position
 
 func _projection_to_column_major_floats(matrix: Projection) -> Array:
 	return [

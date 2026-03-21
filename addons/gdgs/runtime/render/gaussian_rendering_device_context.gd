@@ -140,3 +140,15 @@ static func create_push_constant(data: Array) -> PackedByteArray:
 			TYPE_FLOAT:
 				packed_data.encode_float(i * 4, float(data[i]))
 	return packed_data
+
+static func create_buffer_data(data: Array) -> PackedByteArray:
+	var packed_data := PackedByteArray()
+	packed_data.resize(data.size() * 4)
+	packed_data.fill(0)
+	for i in range(data.size()):
+		match typeof(data[i]):
+			TYPE_INT, TYPE_BOOL:
+				packed_data.encode_s32(i * 4, int(data[i]))
+			TYPE_FLOAT:
+				packed_data.encode_float(i * 4, float(data[i]))
+	return packed_data
