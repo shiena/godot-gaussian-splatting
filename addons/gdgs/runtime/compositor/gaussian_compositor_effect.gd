@@ -313,13 +313,7 @@ func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: Rend
 		])
 
 		var fb: RID = rd.framebuffer_create([scene_tex])
-		var draw_list: int = rd.draw_list_begin(
-			fb,
-			RenderingDevice.INITIAL_ACTION_LOAD,
-			RenderingDevice.FINAL_ACTION_STORE,
-			RenderingDevice.INITIAL_ACTION_DISCARD,
-			RenderingDevice.FINAL_ACTION_DISCARD
-		)
+		var draw_list: int = rd.draw_list_begin(fb)
 		rd.draw_list_bind_render_pipeline(draw_list, raster_pipeline)
 		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
 		rd.draw_list_set_push_constant(
