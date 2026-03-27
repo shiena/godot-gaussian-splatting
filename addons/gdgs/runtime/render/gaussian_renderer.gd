@@ -116,35 +116,57 @@ func _rasterize_state(state, point_count: int) -> void:
 		+ _projection_to_column_major_floats(state.camera_projection_right)
 	)
 	state.context.device.buffer_update(state.descriptors["uniforms"].rid, 0, ubo_data.size(), ubo_data)
-	state.context.device.buffer_clear(state.descriptors["histogram"].rid, 0, 4 + 4 * RADIX * 4)
-	state.context.device.buffer_clear(state.descriptors["tile_bounds"].rid, 0, state.tile_dims.x * state.tile_dims.y * 2 * 4)
+	# Use buffer_update with zero data instead of buffer_clear.
+	# buffer_clear uses vkCmdFillBuffer (transfer op) which may lack a
+	# proper transfer→compute barrier on some mobile Vulkan drivers.
+	# buffer_update goes through a staging-buffer path that is more
+	# reliably synchronised with subsequent compute dispatches.
+	var histogram_clear_size: int = 4 + 4 * RADIX * 4
+	var zero_histogram := PackedByteArray()
+	zero_histogram.resize(histogram_clear_size)
+	zero_histogram.fill(0)
+	state.context.device.buffer_update(state.descriptors["histogram"].rid, 0, histogram_clear_size, zero_histogram)
+	var tile_bounds_clear_size: int = state.tile_dims.x * state.tile_dims.y * 2 * 4
+	var zero_tile_bounds := PackedByteArray()
+	zero_tile_bounds.resize(tile_bounds_clear_size)
+	zero_tile_bounds.fill(0)
+	state.context.device.buffer_update(state.descriptors["tile_bounds"].rid, 0, tile_bounds_clear_size, zero_tile_bounds)
+
+	# All compute work runs in a single compute list so that
+	# compute_list_add_barrier() (called after every dispatch inside
+	# create_pipeline) guarantees correct memory ordering on mobile GPUs
+	# where inter-list synchronisation is not implicit.
+	var compute_list: int = state.context.compute_list_begin()
+
+	# Clear histogram inside compute list (avoids transfer→compute barrier issues)
+	var clear_push_constant := RenderingDeviceContext.create_push_constant([1])
+	state.pipelines["gsplat_projection_clear"].call(state.context, compute_list, clear_push_constant)
 
 	# Projection pass — runs once for all views
-	var compute_list: int = state.context.compute_list_begin()
-	state.pipelines["gsplat_projection"].call(state.context, compute_list, PackedByteArray())
-	state.context.compute_list_end()
+	var projection_push_constant := RenderingDeviceContext.create_push_constant([0])
+	state.pipelines["gsplat_projection"].call(state.context, compute_list, projection_push_constant)
 
 	# Radix sort — runs once using primary eye depth
-	compute_list = state.context.compute_list_begin()
 	for radix_shift_pass in range(4):
 		var sort_push_constant := RenderingDeviceContext.create_push_constant([
 			radix_shift_pass,
 			point_count * MAX_SORT_ELEMENTS_PER_SPLAT * (radix_shift_pass % 2),
 			point_count * MAX_SORT_ELEMENTS_PER_SPLAT * (1 - (radix_shift_pass % 2))
 		])
-		state.pipelines["radix_sort_upsweep"].call(state.context, compute_list, sort_push_constant, [], state.descriptors["grid_dimensions"].rid, 0)
+		state.pipelines["radix_sort_upsweep"].call(state.context, compute_list, sort_push_constant)
 		state.pipelines["radix_sort_spine"].call(state.context, compute_list, sort_push_constant)
-		state.pipelines["radix_sort_downsweep"].call(state.context, compute_list, sort_push_constant, [], state.descriptors["grid_dimensions"].rid, 0)
-	state.context.compute_list_end()
+		state.pipelines["radix_sort_downsweep"].call(state.context, compute_list, sort_push_constant)
+
+	# Clear tile_bounds inside compute list (avoids transfer→compute barrier issues)
+	var tile_clear_push_constant := RenderingDeviceContext.create_push_constant([1, state.tile_count])
+	state.pipelines["gsplat_tile_bounds_clear"].call(state.context, compute_list, tile_clear_push_constant)
 
 	# Boundaries pass — runs once
-	compute_list = state.context.compute_list_begin()
-	state.pipelines["gsplat_boundaries"].call(state.context, compute_list, PackedByteArray(), [], state.descriptors["grid_dimensions"].rid, 3 * 4)
-	state.context.compute_list_end()
+	var boundaries_push_constant := RenderingDeviceContext.create_push_constant([0, 0])
+	state.pipelines["gsplat_boundaries"].call(state.context, compute_list, boundaries_push_constant)
 
 	# Render pass — runs once per eye with per-view output textures
 	for eye_index in range(state.view_count):
-		compute_list = state.context.compute_list_begin()
 		var render_push_constant := RenderingDeviceContext.create_push_constant([
 			0.0, -1, state.depth_capture_alpha, eye_index, state.view_count, 0, 0, 0
 		])
@@ -152,7 +174,8 @@ func _rasterize_state(state, point_count: int) -> void:
 			state.context, compute_list, render_push_constant,
 			[state.render_sets[eye_index]]
 		)
-		state.context.compute_list_end()
+
+	state.context.compute_list_end()
 
 func _update_camera(state, camera_transform: Transform3D, camera_projection: Projection, camera_world_position: Vector3) -> void:
 	state.camera_view = Projection(camera_transform.affine_inverse())

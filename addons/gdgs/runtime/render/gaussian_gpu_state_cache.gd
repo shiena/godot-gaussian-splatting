@@ -29,6 +29,7 @@ class RenderState:
 
 	var texture_size := Vector2i.ONE
 	var tile_dims := Vector2i.ONE
+	var tile_count := 1
 	## 1 = mono, 2 = stereo. Changing this triggers a GPU rebuild.
 	var view_count := 1
 	var camera_projection := Projection.IDENTITY
@@ -97,6 +98,12 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 	state.shaders["radix_downsweep"] = state.context.load_shader(SHADER_PATH_RADIX_DOWNSWEEP)
 	state.shaders["boundaries"] = state.context.load_shader(SHADER_PATH_BOUNDARIES)
 	state.shaders["render"] = state.context.load_shader(SHADER_PATH_RENDER)
+
+	for shader_name in state.shaders:
+		if not state.shaders[shader_name].is_valid():
+			push_error("[gdgs] Shader '%s' failed to compile — aborting GPU state rebuild." % shader_name)
+			cleanup_state(state)
+			return
 
 	var num_sort_elements_max := point_count * MAX_SORT_ELEMENTS_PER_SPLAT
 	var num_partitions := (num_sort_elements_max + PARTITION_SIZE - 1) / PARTITION_SIZE
@@ -170,12 +177,25 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 		state.descriptors["tile_bounds"]
 	], state.shaders["boundaries"], 0)
 
+	var boundaries_dispatch_x: int = ceili(num_sort_elements_max / 256.0)
+	var tile_count: int = state.tile_dims.x * state.tile_dims.y
+	var tile_clear_dispatch_x: int = ceili(float(tile_count) / 256.0)
+
+	# Clear pipeline: same shader as projection but dispatched with 4 workgroups
+	# and push constant _pad0=1 to zero sort_buffer_size & global_histogram
+	# inside the compute list (avoids transfer→compute barrier issues on mobile).
+	state.pipelines["gsplat_projection_clear"] = state.context.create_pipeline([4, 1, 1], [projection_set], state.shaders["projection"])
 	state.pipelines["gsplat_projection"] = state.context.create_pipeline([ceili(point_count / 256.0), 1, 1], [projection_set], state.shaders["projection"])
-	state.pipelines["radix_sort_upsweep"] = state.context.create_pipeline([], [radix_upsweep_set], state.shaders["radix_upsweep"])
+	state.pipelines["radix_sort_upsweep"] = state.context.create_pipeline([num_partitions, 1, 1], [radix_upsweep_set], state.shaders["radix_upsweep"])
 	state.pipelines["radix_sort_spine"] = state.context.create_pipeline([RADIX, 1, 1], [radix_spine_set], state.shaders["radix_spine"])
-	state.pipelines["radix_sort_downsweep"] = state.context.create_pipeline([], [radix_downsweep_set], state.shaders["radix_downsweep"])
-	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([], [boundaries_set], state.shaders["boundaries"])
+	state.pipelines["radix_sort_downsweep"] = state.context.create_pipeline([num_partitions, 1, 1], [radix_downsweep_set], state.shaders["radix_downsweep"])
+	# Tile bounds clear pipeline: boundaries shader with mode=1
+	state.pipelines["gsplat_tile_bounds_clear"] = state.context.create_pipeline([tile_clear_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
+	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([boundaries_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
 	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [state.render_sets[0]], state.shaders["render"])
+
+	# Store tile_count for per-frame clear dispatch
+	state.tile_count = tile_count
 
 	state.needs_gpu_rebuild = false
 	state.needs_splat_upload = true
