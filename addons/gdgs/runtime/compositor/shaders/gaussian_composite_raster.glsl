@@ -84,9 +84,11 @@ void main() {
 		discard;
 	}
 
-	vec4 gsplat_color = texelFetch(gsplat_tex, pixel, 0);
+	// Use UV-based sampling to handle GS textures at different resolution than screen
+	vec2 uv = (vec2(pixel) + 0.5) / p.screen_size;
+	vec4 gsplat_color = texture(gsplat_tex, uv);
 	float gsplat_alpha = gsplat_color.a;
-	float gsplat_view_depth = texelFetch(gsplat_depth_tex, pixel, 0).r;
+	float gsplat_view_depth = texture(gsplat_depth_tex, uv).r;
 	bool has_gsplat_depth = gsplat_view_depth < INVALID_DEPTH;
 
 	bool has_scene_depth = false;

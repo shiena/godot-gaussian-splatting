@@ -36,6 +36,8 @@ enum CompositeMethod {
 @export_range(0, 3) var sh_degree: int = 3
 ## Minimum projected screen-space radius in pixels. Splats smaller than this are culled.
 @export_range(0.0, 16.0, 0.5) var min_radius: float = 0.0
+## Resolution scale for the gaussian splatting render pass. Lower values improve performance at the cost of sharpness.
+@export_range(0.25, 1.0, 0.05) var render_scale: float = 1.0
 @export_enum("Compositor", "Direct Texture") var display_mode: int:
 	set(value):
 		_display_mode = clampi(value, DisplayMode.COMPOSITOR, DisplayMode.DIRECT_TEXTURE)
@@ -153,8 +155,10 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		camera_data_array.append(camera_data)
 
 	# Render all views at once (projection + sort once, render per eye)
+	var gs_scale := clampf(render_scale, 0.25, 1.0)
+	var gs_size := Vector2i(maxi(1, int(size.x * gs_scale)), maxi(1, int(size.y * gs_scale)))
 	var gsplat_result: Dictionary = manager.render_for_compositor_multiview(
-		size, camera_data_array, _get_depth_capture_alpha(), sh_degree, min_radius
+		gs_size, camera_data_array, _get_depth_capture_alpha(), sh_degree, min_radius
 	)
 	var gsplat_views: Array = gsplat_result.get("views", [])
 	if gsplat_views.size() != view_count:
