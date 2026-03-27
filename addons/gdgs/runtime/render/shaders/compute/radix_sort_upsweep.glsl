@@ -1,8 +1,6 @@
 #[compute]
 #version 460 core
 
-#extension GL_KHR_shader_subgroup_basic: enable
-
 /**
  * vulkan_radix_sort, modified under the MIT license.
  * Source: https://github.com/jaesung-cs/vulkan_radix_sort/tree/master
@@ -33,9 +31,7 @@ layout (push_constant) uniform PushConstant {
 shared uint local_histogram[RADIX];
 
 void main() {
-    uint thread_index = gl_SubgroupInvocationID; // 0..31
-    uint subgroup_index = gl_SubgroupID;         // 0..31
-    uint index = subgroup_index * gl_SubgroupSize + thread_index;
+    uint index = gl_LocalInvocationIndex;
 
     uint element_count = element_count;
     uint partition_index = gl_WorkGroupID.x;
