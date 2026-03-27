@@ -1,8 +1,6 @@
 #[compute]
 #version 460
 
-#extension GL_KHR_shader_subgroup_arithmetic: enable
-
 #define MIN_FACTOR     (255)
 #define MIN_ALPHA      (1.0 / MIN_FACTOR)
 #define DEPTH_ALPHA    (1e-6)
@@ -44,7 +42,11 @@ layout(push_constant) restrict readonly uniform PushConstants {
 	float heatmap_factor;
     uint target_tile_id;
     float depth_capture_alpha;
-    float _pad0;
+    uint eye_index;
+    uint view_count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 };
 
 shared vec3[WORKGROUP_SIZE] conic_tile;
@@ -62,7 +64,7 @@ void main() {
     barrier();
 	const ivec2 dims = imageSize(rasterized_image);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
-    
+
     const uvec2 id_block = gl_WorkGroupID.xy;
     const uint id_local = gl_LocalInvocationIndex;
     const uint tile_id = id_block.y*grid_size.x + id_block.x;
@@ -83,9 +85,11 @@ void main() {
 
         barrier();
         // Coalesced load of the next tile of data into shared memory.
+        // Index into the interleaved culled_buffer: splat_id * view_count + eye_index
         RasterizeData data;
         if (id_local < chunk_size) {
-            data = culled_buffer[sort_buffer[(bounds.x + sort_offset) + id_local]];
+            uint splat_id = sort_buffer[(bounds.x + sort_offset) + id_local];
+            data = culled_buffer[splat_id * view_count + eye_index];
         } else {
             data.conic = vec3(0.0);
             data.color = vec4(0.0);
@@ -106,7 +110,7 @@ void main() {
             vec4 color = color_tile[j];
             vec2 offset = image_pos_tile[j] - image_pos;
             float splat_depth = depth_tile[j];
-            
+
             float power = -0.5 * (conic.x * offset.x*offset.x + conic.z * offset.y*offset.y) - conic.y * offset.x*offset.y;
             // if (power > 0.0) continue; // Branching is slowwwwww
             float alpha = color.a * exp(power);
@@ -140,9 +144,10 @@ void main() {
 
     // Used for when the user selects a tile to move the cursor to. This is not as accurate as checking
     // for the closest splat in the cursor position, but it is much faster.
-    if (subgroupElect() && pixel_in_bounds && tile_id == target_tile_id && t != 1.0) {
+    if (gl_LocalInvocationIndex == 0 && pixel_in_bounds && tile_id == target_tile_id && t != 1.0) {
         // roundi(lerpf(bounds[0], bounds[1], 0.1))
-        RasterizeData target_data = culled_buffer[sort_buffer[bounds.x + (bounds.y - bounds.x)/10]];
+        uint target_splat_id = sort_buffer[bounds.x + (bounds.y - bounds.x)/10];
+        RasterizeData target_data = culled_buffer[target_splat_id * view_count + eye_index];
         splat_pos = vec3(target_data.pos_xy, target_data.pos_z);
         num_tile_splats = float(num_splats);
     }

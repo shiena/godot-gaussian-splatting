@@ -198,8 +198,8 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 
 ## 0x09 已知限制
 
-- 当前仅面向桌面 `Forward Plus` 渲染。
-- 依赖 Godot 的 compositor 与 compute 管线，因此不支持 compatibility 和 mobile 渲染器。
+- 不支持 `Compatibility` 渲染器（无 CompositorEffect / RenderingDevice）。
+- 在 `Mobile` 渲染器上，合成阶段使用光栅化（片段着色器）回退，因为 Godot 不会在内部渲染缓冲区上设置 `TEXTURE_USAGE_STORAGE_BIT`（[godotengine/godot#96737](https://github.com/godotengine/godot/issues/96737)）。投影、排序和 tile 光栅化仍以 compute shader 运行。
 - 在 4K 显示器下，如果显存压力过高，可能会出现渲染错误或画面异常；将 Godot 视口分辨率调低后通常会有所缓解。该限制来源于 [issue #3](https://github.com/ReconWorldLab/godot-gaussian-splatting/issues/3)。
 - 当前渲染管理器仍以共享的 root 级运行时管理器存在，复杂的编辑器多场景或多视口工作流仍需要进一步验证。
 - 标准 `.ply` 仅支持 Gaussian Splat 所需的二进制小端布局，不支持任意点云属性结构。
@@ -211,11 +211,16 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 - 感谢 [@4321ba](https://github.com/4321ba) 提交 [PR #6](https://github.com/ReconWorldLab/godot-gaussian-splatting/pull/6)，为项目补充了编辑器图标、可见性联动处理，以及共享 Gaussian 数据的实例化复用支持。
 - 上游 `2Retr0/GodotGaussianSplatting` 仓库采用 MIT License。若你复用与其实现密切相关的衍生内容，请同时检查并保留相应的上游许可说明。
 - radix sort 相关 shader 文件也保留了各自的上游来源说明，详见对应 shader 文件头部注释。
+- Multiview/XR 立体渲染支持参考了 [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting)（基于 aras-p 的 Unity Gaussian Splatting 的 Single Pass Instanced/Multiview 支持）。
+- 光栅化合成路径（Mobile 渲染器支持）参考了 [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays)（Godot 光栅化 CompositorEffect 示例）。
 
 ## 0x0B 参考资料
 
 - [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)
 - [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://arxiv.org/abs/2308.04079)
+- [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR 参考实现
+- [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — 中心眼排序策略参考
+- [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) — 光栅化 CompositorEffect 参考
 
 ## 0x0C 许可证
 
