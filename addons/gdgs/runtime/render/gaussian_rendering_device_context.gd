@@ -52,8 +52,19 @@ func compute_list_end() -> void:
 func load_shader(path: String) -> RID:
 	if not shader_cache.has(path):
 		var shader_file: RDShaderFile = load(path)
+		if shader_file == null:
+			push_error("[gdgs] Failed to load shader file: ", path)
+			return RID()
 		var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
-		shader_cache[path] = deletion_queue.push(device.shader_create_from_spirv(shader_spirv))
+		var compile_error := shader_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+		if compile_error != "":
+			push_error("[gdgs] Shader compile error in %s: %s" % [path, compile_error])
+			return RID()
+		var shader_rid: RID = device.shader_create_from_spirv(shader_spirv)
+		if not shader_rid.is_valid():
+			push_error("[gdgs] Failed to create shader from SPIR-V: ", path)
+			return RID()
+		shader_cache[path] = deletion_queue.push(shader_rid)
 	return shader_cache[path]
 
 func create_storage_buffer(size: int, data: PackedByteArray = PackedByteArray(), usage: int = 0) -> Descriptor:
@@ -133,6 +144,18 @@ static func create_push_constant(data: Array) -> PackedByteArray:
 	packed_data.resize(packed_size + (padding if padding > 0 else 0))
 	packed_data.fill(0)
 
+	for i in range(data.size()):
+		match typeof(data[i]):
+			TYPE_INT, TYPE_BOOL:
+				packed_data.encode_s32(i * 4, int(data[i]))
+			TYPE_FLOAT:
+				packed_data.encode_float(i * 4, float(data[i]))
+	return packed_data
+
+static func create_buffer_data(data: Array) -> PackedByteArray:
+	var packed_data := PackedByteArray()
+	packed_data.resize(data.size() * 4)
+	packed_data.fill(0)
 	for i in range(data.size()):
 		match typeof(data[i]):
 			TYPE_INT, TYPE_BOOL:
