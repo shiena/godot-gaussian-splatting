@@ -67,9 +67,12 @@ void main() {
     }
 
     vec4 scene_color = imageLoad(scene_tex, pixel);
-    vec4 gsplat_color = imageLoad(gsplat_tex, pixel);
+    // Map full-res pixel to (potentially lower-res) GS texture coordinates
+    ivec2 gs_size = imageSize(gsplat_tex);
+    ivec2 gs_pixel = min(ivec2(vec2(pixel) * vec2(gs_size) / size), gs_size - 1);
+    vec4 gsplat_color = imageLoad(gsplat_tex, gs_pixel);
     float gsplat_alpha = gsplat_color.a;
-    float gsplat_view_depth = imageLoad(gsplat_depth_tex, pixel).r;
+    float gsplat_view_depth = imageLoad(gsplat_depth_tex, gs_pixel).r;
     bool has_gsplat_depth = gsplat_view_depth < INVALID_DEPTH;
 
     bool has_scene_depth = false;
