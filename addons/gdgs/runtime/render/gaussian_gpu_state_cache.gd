@@ -14,11 +14,16 @@ const FLOATS_PER_SPLAT := 60
 const FLOATS_PER_CULLED_SPLAT := 16
 const BYTES_PER_FLOAT := 4
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
+# UBO layout: vec3+float(16) + ivec2+int+int(16) + 4x mat4(256) = 288 bytes
+const UBO_SIZE := 288
 
 const SHADER_PATH_PROJECTION := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_projection.glsl"
-const SHADER_PATH_RADIX_UPSWEEP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep.glsl"
-const SHADER_PATH_RADIX_SPINE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine.glsl"
-const SHADER_PATH_RADIX_DOWNSWEEP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep.glsl"
+const SHADER_PATH_RADIX_UPSWEEP_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep_forward.glsl"
+const SHADER_PATH_RADIX_UPSWEEP_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep_mobile.glsl"
+const SHADER_PATH_RADIX_SPINE_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine_forward.glsl"
+const SHADER_PATH_RADIX_SPINE_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine_mobile.glsl"
+const SHADER_PATH_RADIX_DOWNSWEEP_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep_forward.glsl"
+const SHADER_PATH_RADIX_DOWNSWEEP_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep_mobile.glsl"
 const SHADER_PATH_BOUNDARIES := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_boundaries.glsl"
 const SHADER_PATH_RENDER := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_render.glsl"
 
@@ -27,10 +32,15 @@ class RenderState:
 
 	var texture_size := Vector2i.ONE
 	var tile_dims := Vector2i.ONE
-	var camera_projection: Projection
-	var camera_view: Projection
-	var camera_push_constants := PackedByteArray()
+	var tile_count := 1
+	## 1 = mono, 2 = stereo. Changing this triggers a GPU rebuild.
+	var view_count := 1
+	var camera_projection := Projection.IDENTITY
+	var camera_view := Projection.IDENTITY
+	var camera_projection_right := Projection.IDENTITY
+	var camera_view_right := Projection.IDENTITY
 	var camera_world_position := Vector3.ZERO
+	var camera_world_position_right := Vector3.ZERO
 	var depth_capture_alpha := 0.5
 	var needs_gpu_rebuild := true
 	var needs_splat_upload := false
@@ -39,6 +49,7 @@ class RenderState:
 	var shaders: Dictionary = {}
 	var pipelines: Dictionary = {}
 	var descriptors: Dictionary = {}
+	var render_sets: Array = [] # Per-view render descriptor set RIDs
 
 var _render_states: Dictionary = {}
 var _render_state_lru: Array = []
@@ -84,12 +95,25 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 
 	state.context = RenderingDeviceContext.create(RenderingServer.get_rendering_device())
 
+	# Use fast subgroup-based sort on desktop, subgroup-free sort on mobile.
+	# Adreno GPUs report incorrect gl_SubgroupSize, breaking subgroup operations.
+	var use_forward_sort := OS.has_feature("forward_plus")
+
 	state.shaders["projection"] = state.context.load_shader(SHADER_PATH_PROJECTION)
-	state.shaders["radix_upsweep"] = state.context.load_shader(SHADER_PATH_RADIX_UPSWEEP)
-	state.shaders["radix_spine"] = state.context.load_shader(SHADER_PATH_RADIX_SPINE)
-	state.shaders["radix_downsweep"] = state.context.load_shader(SHADER_PATH_RADIX_DOWNSWEEP)
+	state.shaders["radix_upsweep"] = state.context.load_shader(
+		SHADER_PATH_RADIX_UPSWEEP_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_UPSWEEP_MOBILE)
+	state.shaders["radix_spine"] = state.context.load_shader(
+		SHADER_PATH_RADIX_SPINE_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_SPINE_MOBILE)
+	state.shaders["radix_downsweep"] = state.context.load_shader(
+		SHADER_PATH_RADIX_DOWNSWEEP_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_DOWNSWEEP_MOBILE)
 	state.shaders["boundaries"] = state.context.load_shader(SHADER_PATH_BOUNDARIES)
 	state.shaders["render"] = state.context.load_shader(SHADER_PATH_RENDER)
+
+	for shader_name in state.shaders:
+		if not state.shaders[shader_name].is_valid():
+			push_error("[gdgs] Shader '%s' failed to compile — aborting GPU state rebuild." % shader_name)
+			cleanup_state(state)
+			return
 
 	var num_sort_elements_max := point_count * MAX_SORT_ELEMENTS_PER_SPLAT
 	var num_partitions := (num_sort_elements_max + PARTITION_SIZE - 1) / PARTITION_SIZE
@@ -102,18 +126,33 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 	block_dims[3] = ceili(num_sort_elements_max / 256.0)
 
 	state.descriptors["splats"] = state.context.create_storage_buffer(point_count * FLOATS_PER_SPLAT * BYTES_PER_FLOAT)
-	state.descriptors["culled_splats"] = state.context.create_storage_buffer(point_count * FLOATS_PER_CULLED_SPLAT * BYTES_PER_FLOAT)
+	state.descriptors["culled_splats"] = state.context.create_storage_buffer(point_count * state.view_count * FLOATS_PER_CULLED_SPLAT * BYTES_PER_FLOAT)
 	state.descriptors["grid_dimensions"] = state.context.create_storage_buffer(6 * 4, block_dims.to_byte_array(), RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
 	state.descriptors["histogram"] = state.context.create_storage_buffer(4 + (1 + 4 * RADIX + num_partitions * RADIX) * 4)
 	state.descriptors["sort_keys"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["sort_values"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["splat_instance_ids"] = state.context.create_storage_buffer(point_count * 4)
 	state.descriptors["instance_transforms"] = state.context.create_storage_buffer(instance_count * 16 * BYTES_PER_FLOAT)
-	state.descriptors["uniforms"] = state.context.create_uniform_buffer(8 * 4)
+	state.descriptors["uniforms"] = state.context.create_uniform_buffer(UBO_SIZE)
 	state.descriptors["tile_bounds"] = state.context.create_storage_buffer(state.tile_dims.x * state.tile_dims.y * 2 * 4)
 	state.descriptors["tile_splat_pos"] = state.context.create_storage_buffer(4 * 4)
-	state.descriptors["render_texture"] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
-	state.descriptors["depth_texture"] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
+
+	# Create per-view render/depth textures and descriptor sets
+	state.render_sets.clear()
+	for v in range(state.view_count):
+		var rt_key := "render_texture_%d" % v
+		var dt_key := "depth_texture_%d" % v
+		state.descriptors[rt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
+		state.descriptors[dt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
+		var render_set_v: RID = state.context.create_descriptor_set([
+			state.descriptors["culled_splats"],
+			state.descriptors["sort_values"],
+			state.descriptors["tile_bounds"],
+			state.descriptors["tile_splat_pos"],
+			state.descriptors[rt_key],
+			state.descriptors[dt_key]
+		], state.shaders["render"], 0)
+		state.render_sets.append(render_set_v)
 
 	var projection_set: RID = state.context.create_descriptor_set([
 		state.descriptors["splats"],
@@ -148,21 +187,25 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 		state.descriptors["tile_bounds"]
 	], state.shaders["boundaries"], 0)
 
-	var render_set: RID = state.context.create_descriptor_set([
-		state.descriptors["culled_splats"],
-		state.descriptors["sort_values"],
-		state.descriptors["tile_bounds"],
-		state.descriptors["tile_splat_pos"],
-		state.descriptors["render_texture"],
-		state.descriptors["depth_texture"]
-	], state.shaders["render"], 0)
+	var boundaries_dispatch_x: int = ceili(num_sort_elements_max / 256.0)
+	var tile_count: int = state.tile_dims.x * state.tile_dims.y
+	var tile_clear_dispatch_x: int = ceili(float(tile_count) / 256.0)
 
+	# Clear pipeline: same shader as projection but dispatched with 4 workgroups
+	# and push constant _pad0=1 to zero sort_buffer_size & global_histogram
+	# inside the compute list (avoids transfer→compute barrier issues on mobile).
+	state.pipelines["gsplat_projection_clear"] = state.context.create_pipeline([4, 1, 1], [projection_set], state.shaders["projection"])
 	state.pipelines["gsplat_projection"] = state.context.create_pipeline([ceili(point_count / 256.0), 1, 1], [projection_set], state.shaders["projection"])
-	state.pipelines["radix_sort_upsweep"] = state.context.create_pipeline([], [radix_upsweep_set], state.shaders["radix_upsweep"])
+	state.pipelines["radix_sort_upsweep"] = state.context.create_pipeline([num_partitions, 1, 1], [radix_upsweep_set], state.shaders["radix_upsweep"])
 	state.pipelines["radix_sort_spine"] = state.context.create_pipeline([RADIX, 1, 1], [radix_spine_set], state.shaders["radix_spine"])
-	state.pipelines["radix_sort_downsweep"] = state.context.create_pipeline([], [radix_downsweep_set], state.shaders["radix_downsweep"])
-	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([], [boundaries_set], state.shaders["boundaries"])
-	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [render_set], state.shaders["render"])
+	state.pipelines["radix_sort_downsweep"] = state.context.create_pipeline([num_partitions, 1, 1], [radix_downsweep_set], state.shaders["radix_downsweep"])
+	# Tile bounds clear pipeline: boundaries shader with mode=1
+	state.pipelines["gsplat_tile_bounds_clear"] = state.context.create_pipeline([tile_clear_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
+	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([boundaries_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
+	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [state.render_sets[0]], state.shaders["render"])
+
+	# Store tile_count for per-frame clear dispatch
+	state.tile_count = tile_count
 
 	state.needs_gpu_rebuild = false
 	state.needs_splat_upload = true
@@ -190,6 +233,7 @@ func cleanup_state(state) -> void:
 	state.shaders.clear()
 	state.pipelines.clear()
 	state.descriptors.clear()
+	state.render_sets.clear()
 	state.needs_gpu_rebuild = true
 	state.needs_splat_upload = true
 	state.needs_instance_upload = true

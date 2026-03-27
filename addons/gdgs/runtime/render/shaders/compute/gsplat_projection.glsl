@@ -1,7 +1,24 @@
-﻿#[compute]
-#version 460
+// Multiview gaussian splat projection.
+//
+// Mono (view_count=1): identical to single-view — no stereo overhead.
+// Stereo (view_count=2): projects both eyes in one dispatch. Frustum
+// culling uses an expanded clip-space margin so that splats near the
+// primary eye's frustum edge are not discarded when they fall inside the
+// secondary eye's FOV due to IPD offset.  Sorting uses only the primary
+// (left) eye depth — averaged with the right eye's depth in stereo for
+// a center-eye sort key — so it runs once for both views.
+// The right eye shares the 2D covariance from the left eye and only
+// recomputes clip position + depth (the IPD-induced difference in
+// screen-space covariance is negligible for typical stereo baselines).
+//
+// culled_buffer layout: interleaved [left_0, right_0, left_1, right_1, ...]
+//   index = splat_id * view_count + eye_index
+//
+// Reference: arghyasur1991/UnityGaussianSplatting (MIT License)
+// https://github.com/arghyasur1991/UnityGaussianSplatting
 
-#extension GL_KHR_shader_subgroup_arithmetic: enable
+#[compute]
+#version 460
 
 #define SH_C0 0.28209479177387814
 #define SH_C1 0.4886025119029199
@@ -69,7 +86,7 @@ layout (std430, set = 0, binding = 4) restrict writeonly buffer SortValuesBuffer
     uint sort_values[];
 };
 
-layout (std430, set = 0, binding = 5) restrict writeonly buffer GridDimensionsBuffer {
+layout (std430, set = 0, binding = 5) restrict buffer GridDimensionsBuffer {
 	uint grid_dims[];
 };
 
@@ -81,17 +98,20 @@ layout (std430, set = 0, binding = 7) restrict readonly buffer InstanceTransform
 	mat4 instance_model_matrices[];
 };
 
+layout(push_constant) uniform PushConstant {
+	uint _pad0;
+};
+
 layout (std140, set = 0, binding = 8) restrict uniform Uniforms {
 	vec3 camera_pos;
 	float time;
 	ivec2 dims; // Texture size
 	int point_count;
-	int _uniform_pad0;
-};
-
-layout(push_constant) restrict readonly uniform PushConstants {
+	int view_count; // 1 = mono, 2 = stereo
 	mat4 view_matrix;
 	mat4 projection_matrix;
+	mat4 view_matrix_right;
+	mat4 projection_matrix_right;
 };
 
 float ease_out_cubic(in float x) {
@@ -107,7 +127,7 @@ vec3 get_color(in vec3 view_dir, in float sh_coefficients[16*3]) {
 				z = view_dir.z;
 	const float xx = x*x, yy = y*y, zz = z*z,
 			    xy = x*y, yz = y*z, xz = x*z;
-	return max(vec3(0), 0.5 
+	return max(vec3(0), 0.5
 		// Degree 0
 		+  SH_COEFFICIENTS(0) *   SH_C0
 		// Degree 1
@@ -131,11 +151,11 @@ vec3 get_color(in vec3 view_dir, in float sh_coefficients[16*3]) {
 }
 
 /** Computes a 2D projected covariance matrix from the given Gaussian parameters. */
-vec3 project_covariance(in mat3 covariance_3d, in float scale_modifier, in vec3 mean, in ivec2 dims) {
+vec3 project_covariance(in mat3 covariance_3d, in float scale_modifier, in vec3 mean, in ivec2 p_dims, in mat4 v_mat, in mat4 p_mat) {
 	const mat3 cov_3d = covariance_3d * scale_modifier*scale_modifier;
 	// Godot camera space looks down -Z, so use positive forward depth here.
-	vec2 tan_fov_inv = vec2(projection_matrix[0][0], projection_matrix[1][1]);
-	vec2 focal = vec2(dims - 1) * 0.5 * tan_fov_inv;
+	vec2 tan_fov_inv = vec2(p_mat[0][0], p_mat[1][1]);
+	vec2 focal = vec2(p_dims - 1) * 0.5 * tan_fov_inv;
 	// RenderData projections can encode a Y flip in projection_matrix[1][1].
 	// Keep that sign in the focal scale, but use absolute FOV extents for clamping.
 	vec2 tan_fov = 1.0 / abs(tan_fov_inv);
@@ -143,7 +163,7 @@ vec3 project_covariance(in mat3 covariance_3d, in float scale_modifier, in vec3 
 	focal *= depth_inv;
 
 	mean.xy = clamp(mean.xy * depth_inv, -tan_fov * 1.3, tan_fov * 1.3);
-	mat3 view_linear = mat3(view_matrix);
+	mat3 view_linear = mat3(v_mat);
 	mat3 jacobian = mat3(
 		focal.x, 0, 0,
 		0, focal.y, 0,
@@ -163,25 +183,37 @@ void main() {
 	const int id = int(gl_GlobalInvocationID.x);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
 
+	// _pad0 == 1: clear-only mode (dispatched with 4 workgroups before projection)
+	if (_pad0 == 1u) {
+		if (id == 0) sort_buffer_size = 0;
+		if (id < 4 * 256) histogram[id] = 0;
+		return;
+	}
+
 	if (id >= uint(point_count)) return;
-	
-	barrier();
+
 	const Splat splat = splat_buffer[id];
 	uint instance_id = splat_instance_ids[id];
 	mat4 model_matrix = instance_model_matrices[instance_id];
 
-	// --- FRUSTUM CULLING ---
+	// --- FRUSTUM CULLING (combined for stereo) ---
+	// In stereo mode the IPD offset can place a splat inside one eye's
+	// frustum while it sits just outside the other's.  Expanding the
+	// clip-space margin from 1.2 to 1.5 covers typical VR baselines
+	// (IPD ~63 mm) down to near-plane distances without a second
+	// frustum test, keeping the single-dispatch design intact.
 	mat3 object_linear = mat3(model_matrix);
 	mat3 world_covariance = object_linear * DECODE_COVARIANCE(splat.covariance) * transpose(object_linear);
 	vec4 world_pos = model_matrix * vec4(splat.position, 1.0);
 	vec4 view_pos = view_matrix * world_pos;
 	vec4 clip_pos = projection_matrix * view_pos;
-	vec2 view_bounds = clip_pos.ww*1.2;
+	float frustum_margin = view_count >= 2 ? 1.5 : 1.2;
+	vec2 view_bounds = clip_pos.ww * frustum_margin;
 	if (any(lessThan(clip_pos.xyz, vec3(-view_bounds, 0.0))) || any(greaterThan(clip_pos.xyz, vec3(view_bounds, clip_pos.w)))) {
 		return;
 	}
-	
-	// --- GAUSSIAN PROJECTION ---
+
+	// --- GAUSSIAN PROJECTION (primary/left eye) ---
 	float splat_time = time - splat.time;
 	float time_factor = ease_out_cubic(clamp(splat_time, 0, 1));
 	float time_factor_late = ease_out_cubic(clamp(splat_time - 0.35, 0, 1));
@@ -189,7 +221,7 @@ void main() {
 	float splat_opacity = splat.opacity * time_factor_late*time_factor_late;
 	float splat_scale = mix(2.0, 1.0, time_factor_late);
 
-	const vec3 covariance = project_covariance(world_covariance, splat_scale, view_pos.xyz, dims);
+	const vec3 covariance = project_covariance(world_covariance, splat_scale, view_pos.xyz, dims, view_matrix, projection_matrix);
 	float det = covariance.x*covariance.z - covariance.y*covariance.y;
 	if (det == 0.0) return;
 
@@ -200,7 +232,7 @@ void main() {
 	vec3 ndc_pos = clip_pos.xyz / clip_pos.w;
 	vec2 image_pos = ((ndc_pos.xy + 1.0)*0.5 - vec2(1,0.75)*(1.0 - time_factor)) * (dims - 1);
 
-	// We bias the radius (w/ base=2.5x standard deviation) such that low opacity splats cover 
+	// We bias the radius (w/ base=2.5x standard deviation) such that low opacity splats cover
 	// fewer screen tiles. This has the effect of making the image *slightly* brighter while
 	// minimizing perceptible tile artifacts.
 	float radius = pow(splat_opacity, 0.2) * 2.5*sqrt(max(eigenvalues.x, eigenvalues.y));
@@ -220,13 +252,33 @@ void main() {
 	data.pos_xy = world_pos.xy;
 	data.pos_z = world_pos.z;
 	data.depth_data = vec4(-view_pos.z, 0.0, 0.0, 0.0);
-	culled_buffer[id] = data;
-	barrier();
+	culled_buffer[id * view_count] = data;
+
+	// --- RIGHT EYE PROJECTION (stereo only) ---
+	// Copy left eye data and replace clip position + depth. The 2D covariance
+	// difference between eyes is negligible for typical IPD.
+	float clip_w_right = clip_pos.w; // default to left eye for mono
+	if (view_count >= 2) {
+		vec4 view_pos_right = view_matrix_right * world_pos;
+		vec4 clip_pos_right = projection_matrix_right * view_pos_right;
+		clip_w_right = clip_pos_right.w;
+		vec3 ndc_pos_right = clip_pos_right.xyz / clip_pos_right.w;
+		vec2 image_pos_right = ((ndc_pos_right.xy + 1.0)*0.5 - vec2(1,0.75)*(1.0 - time_factor)) * (dims - 1);
+
+		RasterizeData data_right = data;
+		data_right.image_pos = image_pos_right;
+		data_right.depth_data = vec4(-view_pos_right.z, 0.0, 0.0, 0.0);
+		culled_buffer[id * view_count + 1] = data_right;
+	}
 
 	// --- GAUSSIAN DUPLICATION ---
 	// Use clip-space w as a monotonic distance proxy so ordering stays front-to-back
 	// even when the renderer uses reverse-z projection.
-	float view_depth = max(0.0, clip_pos.w);
+	// In stereo mode, average left and right eye depths for a center-eye
+	// sort key that is equally fair to both views.  Inspired by Nebula
+	// (arxiv:2512.20495) which uses a virtual camera between both eyes
+	// for shared sorting.
+	float view_depth = max(0.0, (clip_pos.w + clip_w_right) * 0.5);
 	float depth01 = view_depth / (1.0 + view_depth);
 	uint depth = uint(depth01 * 65535.0) & 0xFFFF;
 	for (uint y = rect_bounds.y; y < rect_bounds.w; ++y)

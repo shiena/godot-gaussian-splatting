@@ -58,6 +58,19 @@ func render_for_compositor(
 		depth_capture_alpha
 	)
 
+func render_for_compositor_multiview(
+	texture_size: Vector2i,
+	camera_data_array: Array,
+	depth_capture_alpha: float = 0.5
+) -> Dictionary:
+	return _renderer.render_for_compositor_multiview(
+		_gpu_state_cache,
+		_scene_registry,
+		texture_size,
+		camera_data_array,
+		depth_capture_alpha
+	)
+
 func _cleanup_on_render_thread() -> void:
 	_gpu_state_cache.cleanup_all()
 

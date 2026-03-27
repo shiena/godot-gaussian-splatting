@@ -62,8 +62,8 @@
 ## 环境要求
 
 - Godot `4.4` 或更新版本。
-- 使用 `Forward Plus` 渲染后端。
-- 支持 compute shader 的桌面 GPU 和驱动。
+- 使用 `Forward Plus` 或 `Mobile` 渲染后端（不支持 `Compatibility`）。
+- 支持 compute shader 的 GPU 和驱动。
 - 一份受支持格式的 Gaussian 资源文件。
 
 ## 安装方法
@@ -153,8 +153,8 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 
 ## 已知限制
 
-- 当前仅面向桌面 `Forward Plus` 渲染。
-- 依赖 Godot 的 compositor 与 compute 管线，因此不支持 compatibility 和 mobile 渲染器。
+- 不支持 `Compatibility` 渲染器（无 CompositorEffect / RenderingDevice）。
+- 在 `Mobile` 渲染器上，合成阶段使用光栅化（片段着色器）回退，因为 Godot 不会在内部渲染缓冲区上设置 `TEXTURE_USAGE_STORAGE_BIT`（[godotengine/godot#96737](https://github.com/godotengine/godot/issues/96737)）。投影、排序和 tile 光栅化仍以 compute shader 运行。
 - 当前渲染管理器仍以共享的 root 级运行时管理器存在，复杂的编辑器多场景或多视口工作流仍需要进一步验证。
 - 标准 `.ply` 仅支持 Gaussian Splat 所需的二进制小端布局，不支持任意点云属性结构。
 - `.sog` 当前仅支持 `v2` 格式。
@@ -164,11 +164,16 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 - 本项目中的 shader 实现参考了 [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)。感谢 2Retr0 公开该项目。
 - 上游 `2Retr0/GodotGaussianSplatting` 仓库采用 MIT License。若你复用与其实现密切相关的衍生内容，请同时检查并保留相应的上游许可说明。
 - radix sort 相关 shader 文件也保留了各自的上游来源说明，详见对应 shader 文件头部注释。
+- Multiview/XR 立体渲染支持参考了 [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting)（基于 aras-p 的 Unity Gaussian Splatting 的 Single Pass Instanced/Multiview 支持）。
+- 光栅化合成路径（Mobile 渲染器支持）参考了 [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays)（Godot 光栅化 CompositorEffect 示例）。
 
 ## 参考资料
 
 - [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)
 - [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://arxiv.org/abs/2308.04079)
+- [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR 参考实现
+- [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — 中心眼排序策略参考
+- [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) — 光栅化 CompositorEffect 参考
 
 ## 许可证
 

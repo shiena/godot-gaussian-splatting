@@ -73,8 +73,8 @@ Versioning note: the historical `1.0` release is normalized here as `1.0.0`.
 ## Requirements
 
 - Godot `4.4` or newer.
-- `Forward Plus` rendering backend.
-- A desktop GPU and driver with compute shader support.
+- `Forward Plus` or `Mobile` rendering backend (`Compatibility` is not supported).
+- A GPU and driver with compute shader support.
 - A supported Gaussian asset in one of the formats listed below.
 
 ## Installation
@@ -181,8 +181,8 @@ This importer is meant for Gaussian Splatting style assets, not generic point cl
 
 ## Known Limitations
 
-- The plugin currently targets desktop `Forward Plus` rendering only.
-- Rendering depends on Godot's compositor and compute pipeline, so compatibility and mobile renderers are not supported.
+- The `Compatibility` renderer is not supported (no CompositorEffect / RenderingDevice).
+- On the `Mobile` renderer the composite pass uses a raster (fragment-shader) fallback because Godot does not set `TEXTURE_USAGE_STORAGE_BIT` on internal render buffers ([godotengine/godot#96737](https://github.com/godotengine/godot/issues/96737)). Projection, sorting, and tile rasterisation still run as compute shaders.
 - The render manager currently lives as a shared root-level runtime manager, so very complex editor multi-scene or multi-viewport workflows may still need additional validation.
 - Standard `.ply` support expects binary little-endian Gaussian Splat data, not arbitrary point cloud layouts.
 - `.sog` support currently targets version `2` archives only.
@@ -192,11 +192,16 @@ This importer is meant for Gaussian Splatting style assets, not generic point cl
 - The shader work in this plugin was developed with reference to [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting). Thanks to 2Retr0 for publishing that project.
 - The upstream `2Retr0/GodotGaussianSplatting` repository is published under the MIT License. If you reuse or redistribute closely related derivative work, review and retain the relevant upstream license notice.
 - The radix sort shader files also retain their own upstream attribution headers, as documented in the shader sources.
+- Multiview/XR stereo rendering support was developed with reference to [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) (Single Pass Instanced/Multiview support for aras-p's Unity Gaussian Splatting).
+- The raster-based composite path (Mobile renderer support) was developed with reference to [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) (raster-based CompositorEffect demo for Godot).
 
 ## References
 
 - [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)
 - [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://arxiv.org/abs/2308.04079)
+- [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR reference
+- [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — Center-eye sorting strategy reference
+- [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) — Raster-based CompositorEffect reference
 
 ## License
 
