@@ -18,9 +18,12 @@ const MAX_SORT_ELEMENTS_PER_SPLAT := 10
 const UBO_SIZE := 288
 
 const SHADER_PATH_PROJECTION := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_projection.glsl"
-const SHADER_PATH_RADIX_UPSWEEP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep.glsl"
-const SHADER_PATH_RADIX_SPINE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine.glsl"
-const SHADER_PATH_RADIX_DOWNSWEEP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep.glsl"
+const SHADER_PATH_RADIX_UPSWEEP_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep_forward.glsl"
+const SHADER_PATH_RADIX_UPSWEEP_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep_mobile.glsl"
+const SHADER_PATH_RADIX_SPINE_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine_forward.glsl"
+const SHADER_PATH_RADIX_SPINE_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_spine_mobile.glsl"
+const SHADER_PATH_RADIX_DOWNSWEEP_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep_forward.glsl"
+const SHADER_PATH_RADIX_DOWNSWEEP_MOBILE := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_downsweep_mobile.glsl"
 const SHADER_PATH_BOUNDARIES := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_boundaries.glsl"
 const SHADER_PATH_RENDER := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_render.glsl"
 
@@ -92,10 +95,17 @@ func rebuild_gpu_state(state, point_count: int, instance_count: int) -> void:
 
 	state.context = RenderingDeviceContext.create(RenderingServer.get_rendering_device())
 
+	# Use fast subgroup-based sort on desktop, subgroup-free sort on mobile.
+	# Adreno GPUs report incorrect gl_SubgroupSize, breaking subgroup operations.
+	var use_forward_sort := OS.has_feature("forward_plus")
+
 	state.shaders["projection"] = state.context.load_shader(SHADER_PATH_PROJECTION)
-	state.shaders["radix_upsweep"] = state.context.load_shader(SHADER_PATH_RADIX_UPSWEEP)
-	state.shaders["radix_spine"] = state.context.load_shader(SHADER_PATH_RADIX_SPINE)
-	state.shaders["radix_downsweep"] = state.context.load_shader(SHADER_PATH_RADIX_DOWNSWEEP)
+	state.shaders["radix_upsweep"] = state.context.load_shader(
+		SHADER_PATH_RADIX_UPSWEEP_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_UPSWEEP_MOBILE)
+	state.shaders["radix_spine"] = state.context.load_shader(
+		SHADER_PATH_RADIX_SPINE_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_SPINE_MOBILE)
+	state.shaders["radix_downsweep"] = state.context.load_shader(
+		SHADER_PATH_RADIX_DOWNSWEEP_DESKTOP if use_forward_sort else SHADER_PATH_RADIX_DOWNSWEEP_MOBILE)
 	state.shaders["boundaries"] = state.context.load_shader(SHADER_PATH_BOUNDARIES)
 	state.shaders["render"] = state.context.load_shader(SHADER_PATH_RENDER)
 
