@@ -57,7 +57,8 @@ var pipeline: RID
 var raster_shader: RID
 var raster_pipeline: RID
 # Shared
-var depth_sampler: RID
+var depth_sampler: RID  # nearest — for depth textures
+var linear_sampler: RID # bilinear — for GS colour upscaling
 var fallback_depth_texture: RID
 
 var _display_mode := DisplayMode.COMPOSITOR
@@ -107,7 +108,10 @@ func _notification(what: int) -> void:
 			rd.free_rid(raster_shader)
 		if depth_sampler.is_valid():
 			rd.free_rid(depth_sampler)
+		if linear_sampler.is_valid():
+			rd.free_rid(linear_sampler)
 	fallback_depth_texture = RID()
+	linear_sampler = RID()
 	pipeline = RID()
 	shader = RID()
 	raster_pipeline = RID()
@@ -299,7 +303,7 @@ func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: Rend
 		var gsplat_uniform := RDUniform.new()
 		gsplat_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 		gsplat_uniform.binding = 0
-		gsplat_uniform.add_id(depth_sampler)
+		gsplat_uniform.add_id(linear_sampler)
 		gsplat_uniform.add_id(gsplat_texture)
 
 		var gsplat_depth_uniform := RDUniform.new()
@@ -470,8 +474,12 @@ func _initialize_shaders() -> void:
 					push_error("[gdgs] Failed to create compute composite pipeline.")
 
 	# Shared resources
-	var sampler_state := RDSamplerState.new()
-	depth_sampler = rd.sampler_create(sampler_state)
+	var nearest_state := RDSamplerState.new()
+	depth_sampler = rd.sampler_create(nearest_state)
+	var linear_state := RDSamplerState.new()
+	linear_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	linear_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	linear_sampler = rd.sampler_create(linear_state)
 	fallback_depth_texture = _create_fallback_depth_texture()
 
 func _create_fallback_depth_texture() -> RID:
