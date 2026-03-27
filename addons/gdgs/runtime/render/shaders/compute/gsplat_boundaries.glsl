@@ -18,8 +18,20 @@ layout (std430, set = 0, binding = 2) restrict writeonly buffer BoundsBuffer {
     uvec2 bounds_buffer[];
 };
 
+layout(push_constant) uniform PushConstant {
+    uint mode; // 0 = normal boundaries, 1 = clear tile_bounds (tile_count in sort_buffer_size)
+    uint tile_count; // total tiles to clear (only used in mode 1)
+};
+
 void main() {
     const uint id = gl_GlobalInvocationID.x;
+
+    // Mode 1: clear tile_bounds
+    if (mode == 1u) {
+        if (id < tile_count) bounds_buffer[id] = uvec2(0, 0);
+        return;
+    }
+
     const uint count = sort_buffer_size;
     if (id >= count) return;
 
