@@ -67,12 +67,21 @@ void main() {
     }
 
     vec4 scene_color = imageLoad(scene_tex, pixel);
-    // Map full-res pixel to (potentially lower-res) GS texture coordinates
+    // Map full-res pixel to (potentially lower-res) GS texture coordinates.
+    // Bilinear filtering for colour, nearest for depth (avoid edge interpolation).
     ivec2 gs_size = imageSize(gsplat_tex);
-    ivec2 gs_pixel = min(ivec2(vec2(pixel) * vec2(gs_size) / size), gs_size - 1);
-    vec4 gsplat_color = imageLoad(gsplat_tex, gs_pixel);
+    vec2 gs_coord = (vec2(pixel) + 0.5) * vec2(gs_size) / size - 0.5;
+    vec2 gs_floor = floor(gs_coord);
+    vec2 gs_fract = gs_coord - gs_floor;
+    ivec2 p0 = max(ivec2(gs_floor), ivec2(0));
+    ivec2 p1 = min(p0 + 1, gs_size - 1);
+    vec4 gsplat_color = mix(
+        mix(imageLoad(gsplat_tex, ivec2(p0.x, p0.y)), imageLoad(gsplat_tex, ivec2(p1.x, p0.y)), gs_fract.x),
+        mix(imageLoad(gsplat_tex, ivec2(p0.x, p1.y)), imageLoad(gsplat_tex, ivec2(p1.x, p1.y)), gs_fract.x),
+        gs_fract.y);
     float gsplat_alpha = gsplat_color.a;
-    float gsplat_view_depth = imageLoad(gsplat_depth_tex, gs_pixel).r;
+    ivec2 gs_nearest = clamp(ivec2(gs_coord + 0.5), ivec2(0), gs_size - 1);
+    float gsplat_view_depth = imageLoad(gsplat_depth_tex, gs_nearest).r;
     bool has_gsplat_depth = gsplat_view_depth < INVALID_DEPTH;
 
     bool has_scene_depth = false;
