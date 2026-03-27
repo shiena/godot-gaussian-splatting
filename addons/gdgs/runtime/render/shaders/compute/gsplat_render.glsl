@@ -1,8 +1,6 @@
 #[compute]
 #version 460
 
-#extension GL_KHR_shader_subgroup_arithmetic: enable
-
 #define MIN_FACTOR     (255)
 #define MIN_ALPHA      (1.0 / MIN_FACTOR)
 #define DEPTH_ALPHA    (1e-6)
@@ -146,7 +144,7 @@ void main() {
 
     // Used for when the user selects a tile to move the cursor to. This is not as accurate as checking
     // for the closest splat in the cursor position, but it is much faster.
-    if (subgroupElect() && pixel_in_bounds && tile_id == target_tile_id && t != 1.0) {
+    if (gl_LocalInvocationIndex == 0 && pixel_in_bounds && tile_id == target_tile_id && t != 1.0) {
         // roundi(lerpf(bounds[0], bounds[1], 0.1))
         uint target_splat_id = sort_buffer[bounds.x + (bounds.y - bounds.x)/10];
         RasterizeData target_data = culled_buffer[target_splat_id * view_count + eye_index];

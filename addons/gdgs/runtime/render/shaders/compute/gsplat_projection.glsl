@@ -20,8 +20,6 @@
 #[compute]
 #version 460
 
-#extension GL_KHR_shader_subgroup_arithmetic: enable
-
 #define SH_C0 0.28209479177387814
 #define SH_C1 0.4886025119029199
 
@@ -88,7 +86,7 @@ layout (std430, set = 0, binding = 4) restrict writeonly buffer SortValuesBuffer
     uint sort_values[];
 };
 
-layout (std430, set = 0, binding = 5) restrict writeonly buffer GridDimensionsBuffer {
+layout (std430, set = 0, binding = 5) restrict buffer GridDimensionsBuffer {
 	uint grid_dims[];
 };
 
@@ -98,6 +96,10 @@ layout (std430, set = 0, binding = 6) restrict readonly buffer SplatInstanceIdsB
 
 layout (std430, set = 0, binding = 7) restrict readonly buffer InstanceTransformsBuffer {
 	mat4 instance_model_matrices[];
+};
+
+layout(push_constant) uniform PushConstant {
+	uint _pad0;
 };
 
 layout (std140, set = 0, binding = 8) restrict uniform Uniforms {
@@ -181,9 +183,15 @@ void main() {
 	const int id = int(gl_GlobalInvocationID.x);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
 
+	// _pad0 == 1: clear-only mode (dispatched with 4 workgroups before projection)
+	if (_pad0 == 1u) {
+		if (id == 0) sort_buffer_size = 0;
+		if (id < 4 * 256) histogram[id] = 0;
+		return;
+	}
+
 	if (id >= uint(point_count)) return;
 
-	barrier();
 	const Splat splat = splat_buffer[id];
 	uint instance_id = splat_instance_ids[id];
 	mat4 model_matrix = instance_model_matrices[instance_id];
@@ -262,7 +270,6 @@ void main() {
 		data_right.depth_data = vec4(-view_pos_right.z, 0.0, 0.0, 0.0);
 		culled_buffer[id * view_count + 1] = data_right;
 	}
-	barrier();
 
 	// --- GAUSSIAN DUPLICATION ---
 	// Use clip-space w as a monotonic distance proxy so ordering stays front-to-back
