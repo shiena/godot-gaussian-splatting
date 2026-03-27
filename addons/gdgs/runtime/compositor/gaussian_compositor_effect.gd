@@ -32,6 +32,10 @@ enum CompositeMethod {
 @export_range(0.0, 1.0, 0.001) var depth_bias := 0.05
 @export_range(0.0, 1.0, 0.001) var depth_test_min_alpha := 0.05
 @export_range(0.0, 1.0, 0.001) var depth_capture_alpha = 0.5
+## Spherical harmonics degree (0-3). Lower values reduce ALU cost at the expense of view-dependent color detail.
+@export_range(0, 3) var sh_degree: int = 3
+## Minimum projected screen-space radius in pixels. Splats smaller than this are culled.
+@export_range(0.0, 16.0, 0.5) var min_radius: float = 0.0
 @export_enum("Compositor", "Direct Texture") var display_mode: int:
 	set(value):
 		_display_mode = clampi(value, DisplayMode.COMPOSITOR, DisplayMode.DIRECT_TEXTURE)
@@ -150,7 +154,7 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 
 	# Render all views at once (projection + sort once, render per eye)
 	var gsplat_result: Dictionary = manager.render_for_compositor_multiview(
-		size, camera_data_array, _get_depth_capture_alpha()
+		size, camera_data_array, _get_depth_capture_alpha(), sh_degree, min_radius
 	)
 	var gsplat_views: Array = gsplat_result.get("views", [])
 	if gsplat_views.size() != view_count:

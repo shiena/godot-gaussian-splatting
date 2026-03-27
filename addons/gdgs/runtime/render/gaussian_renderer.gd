@@ -32,7 +32,9 @@ func render_for_compositor_multiview(
 	scene_registry: GaussianSceneRegistry,
 	texture_size: Vector2i,
 	camera_data_array: Array,
-	depth_capture_alpha: float = 0.5
+	depth_capture_alpha: float = 0.5,
+	sh_degree: int = 3,
+	min_radius: float = 0.0
 ) -> Dictionary:
 	state_cache.flush_pending_cleanup()
 
@@ -59,6 +61,8 @@ func render_for_compositor_multiview(
 	var primary: Dictionary = camera_data_array[0]
 	_update_camera(state, primary["transform"], primary["projection"], primary["world_position"])
 	state.depth_capture_alpha = clampf(depth_capture_alpha, 0.0, 1.0)
+	state.sh_degree = clampi(sh_degree, 0, 3)
+	state.min_radius = maxf(min_radius, 0.0)
 
 	# Update right eye camera (stereo).
 	# For mono, reset to identity so the UBO contains clean data.
@@ -139,11 +143,11 @@ func _rasterize_state(state, point_count: int) -> void:
 	var compute_list: int = state.context.compute_list_begin()
 
 	# Clear histogram inside compute list (avoids transfer→compute barrier issues)
-	var clear_push_constant := RenderingDeviceContext.create_push_constant([1])
+	var clear_push_constant := RenderingDeviceContext.create_push_constant([1, 0, 0.0, 0])
 	state.pipelines["gsplat_projection_clear"].call(state.context, compute_list, clear_push_constant)
 
 	# Projection pass — runs once for all views
-	var projection_push_constant := RenderingDeviceContext.create_push_constant([0])
+	var projection_push_constant := RenderingDeviceContext.create_push_constant([0, state.sh_degree, state.min_radius, 0])
 	state.pipelines["gsplat_projection"].call(state.context, compute_list, projection_push_constant)
 
 	# Radix sort — runs once using primary eye depth
