@@ -41,23 +41,6 @@ func shutdown() -> void:
 		return
 	RenderingServer.call_on_render_thread(_cleanup_on_render_thread)
 
-func render_for_compositor(
-	texture_size: Vector2i,
-	camera_transform: Transform3D,
-	camera_projection: Projection,
-	camera_world_position: Vector3,
-	depth_capture_alpha: float = 0.5
-) -> Dictionary:
-	return _renderer.render_for_compositor(
-		_gpu_state_cache,
-		_scene_registry,
-		texture_size,
-		camera_transform,
-		camera_projection,
-		camera_world_position,
-		depth_capture_alpha
-	)
-
 func render_for_compositor_multiview(
 	texture_size: Vector2i,
 	camera_data_array: Array,

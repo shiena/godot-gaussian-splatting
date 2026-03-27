@@ -6,24 +6,6 @@ const RenderingDeviceContext := preload("res://addons/gdgs/runtime/render/gaussi
 const RADIX := 256
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
 
-## Single-view render (backward-compatible). Wraps multiview with view_count=1.
-func render_for_compositor(
-	state_cache: GaussianGpuStateCache,
-	scene_registry: GaussianSceneRegistry,
-	texture_size: Vector2i,
-	camera_transform: Transform3D,
-	camera_projection: Projection,
-	camera_world_position: Vector3,
-	depth_capture_alpha: float = 0.5
-) -> Dictionary:
-	var result := render_for_compositor_multiview(
-		state_cache, scene_registry, texture_size,
-		[{"transform": camera_transform, "projection": camera_projection, "world_position": camera_world_position}],
-		depth_capture_alpha
-	)
-	var views: Array = result.get("views", [])
-	return views[0] if views.size() > 0 else {}
-
 ## Multiview render. Runs projection + sort once, then renders per eye.
 ## camera_data_array: Array of {"transform": Transform3D, "projection": Projection, "world_position": Vector3}
 ## Returns {"views": [{"color_alpha_texture": RID, "depth_texture": RID}, ...]}
