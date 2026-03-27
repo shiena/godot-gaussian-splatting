@@ -42,6 +42,8 @@ class RenderState:
 	var camera_world_position := Vector3.ZERO
 	var camera_world_position_right := Vector3.ZERO
 	var depth_capture_alpha := 0.5
+	var sh_degree := 3
+	var min_radius := 0.0
 	var needs_gpu_rebuild := true
 	var needs_splat_upload := false
 	var needs_instance_upload := false
@@ -142,7 +144,7 @@ func rebuild_gpu_state(state, point_count: int, unique_data_size: int, instance_
 	for v in range(state.view_count):
 		var rt_key := "render_texture_%d" % v
 		var dt_key := "depth_texture_%d" % v
-		state.descriptors[rt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
+		state.descriptors[rt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 		state.descriptors[dt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
 		var render_set_v: RID = state.context.create_descriptor_set([
 			state.descriptors["culled_splats"],

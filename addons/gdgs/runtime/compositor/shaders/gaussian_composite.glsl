@@ -8,7 +8,7 @@ layout(
 ) in;
 
 layout(rgba16f, binding = 0, set = 0) uniform image2D scene_tex;
-layout(rgba32f, binding = 1, set = 0) uniform readonly image2D gsplat_tex;
+layout(rgba16f, binding = 1, set = 0) uniform readonly image2D gsplat_tex;
 layout(r32f, binding = 2, set = 0) uniform readonly image2D gsplat_depth_tex;
 layout(set = 0, binding = 3) uniform sampler2D scene_depth_tex;
 

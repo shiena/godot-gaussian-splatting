@@ -35,7 +35,7 @@ layout (std430, set = 0, binding = 3) restrict writeonly buffer TargetTileSplatB
     float num_tile_splats;
 };
 
-layout(rgba32f, set = 0, binding = 4) uniform restrict writeonly image2D rasterized_image;
+layout(rgba16f, set = 0, binding = 4) uniform restrict writeonly image2D rasterized_image;
 layout(r32f, set = 0, binding = 5) uniform restrict writeonly image2D rasterized_depth;
 
 layout(push_constant) restrict readonly uniform PushConstants {
@@ -112,9 +112,8 @@ void main() {
             float splat_depth = depth_tile[j];
 
             float power = -0.5 * (conic.x * offset.x*offset.x + conic.z * offset.y*offset.y) - conic.y * offset.x*offset.y;
-            // if (power > 0.0) continue; // Branching is slowwwwww
-            float alpha = color.a * exp(power);
-            // if (alpha < MIN_ALPHA) continue;
+            float alpha = color.a * exp(min(power, 0.0));
+            if (alpha < MIN_ALPHA) continue;
             float next_t = t * (1.0 - alpha);
             if (
                 alpha > DEPTH_ALPHA &&

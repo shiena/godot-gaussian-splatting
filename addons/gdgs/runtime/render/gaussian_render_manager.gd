@@ -61,14 +61,18 @@ func render_for_compositor(
 func render_for_compositor_multiview(
 	texture_size: Vector2i,
 	camera_data_array: Array,
-	depth_capture_alpha: float = 0.5
+	depth_capture_alpha: float = 0.5,
+	sh_degree: int = 3,
+	min_radius: float = 0.0
 ) -> Dictionary:
 	return _renderer.render_for_compositor_multiview(
 		_gpu_state_cache,
 		_scene_registry,
 		texture_size,
 		camera_data_array,
-		depth_capture_alpha
+		depth_capture_alpha,
+		sh_degree,
+		min_radius
 	)
 
 func _cleanup_on_render_thread() -> void:

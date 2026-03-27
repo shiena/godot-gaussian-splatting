@@ -99,6 +99,9 @@ layout (std430, set = 0, binding = 7) restrict readonly buffer InstanceTransform
 };
 
 layout(push_constant) uniform PushConstant {
+	uint mode;       // 0=project, 1=clear
+	uint sh_degree;  // 0-3: spherical harmonics evaluation degree
+	float min_radius; // minimum projected screen-space radius in pixels
 	uint _pad0;
 };
 
@@ -121,33 +124,36 @@ float ease_out_cubic(in float x) {
 
 /** Calculates the color from given spherical harmonic coefficients and view direction. */
 #define SH_COEFFICIENTS(x) (vec3(sh_coefficients[x*3], sh_coefficients[x*3+1], sh_coefficients[x*3+2]))
-vec3 get_color(in vec3 view_dir, in float sh_coefficients[16*3]) {
-	const float x = view_dir.x,
-			    y = view_dir.y,
-				z = view_dir.z;
-	const float xx = x*x, yy = y*y, zz = z*z,
-			    xy = x*y, yz = y*z, xz = x*z;
-	return max(vec3(0), 0.5
-		// Degree 0
-		+  SH_COEFFICIENTS(0) *   SH_C0
-		// Degree 1
-		-  SH_COEFFICIENTS(1) *   SH_C1 * y
-		+  SH_COEFFICIENTS(2) *   SH_C1 * z
-		-  SH_COEFFICIENTS(3) *   SH_C1 * x
-		// Degree 2
-		+  SH_COEFFICIENTS(4) * SH_C2_0 * xy
-		-  SH_COEFFICIENTS(5) * SH_C2_1 * yz
-		+  SH_COEFFICIENTS(6) * SH_C2_2 * (2.0*zz - xx - yy)
-		-  SH_COEFFICIENTS(7) * SH_C2_3 * xz
-		+  SH_COEFFICIENTS(8) * SH_C2_4 * (xx - yy)
-		// Degree 3
-		-  SH_COEFFICIENTS(9) * SH_C3_0 * y * (3.0*xx - yy)
-		+ SH_COEFFICIENTS(10) * SH_C3_1 * x * yz
-		- SH_COEFFICIENTS(11) * SH_C3_2 * y * (4.0*zz - xx - yy)
-		+ SH_COEFFICIENTS(12) * SH_C3_3 * z * (2.0*zz - 3.0*xx - 3.0*yy)
-		- SH_COEFFICIENTS(13) * SH_C3_4 * x * (4.0*zz - xx - yy)
-		+ SH_COEFFICIENTS(14) * SH_C3_5 * z * (xx - yy)
-		- SH_COEFFICIENTS(15) * SH_C3_6 * x * (xx - 3.0*yy));
+vec3 get_color(in vec3 view_dir, in float sh_coefficients[16*3], in uint degree) {
+	vec3 result = SH_COEFFICIENTS(0) * SH_C0;
+
+	if (degree >= 1u) {
+		const float x = view_dir.x, y = view_dir.y, z = view_dir.z;
+		result += - SH_COEFFICIENTS(1) * SH_C1 * y
+		          + SH_COEFFICIENTS(2) * SH_C1 * z
+		          - SH_COEFFICIENTS(3) * SH_C1 * x;
+
+		if (degree >= 2u) {
+			const float xx = x*x, yy = y*y, zz = z*z,
+			            xy = x*y, yz = y*z, xz = x*z;
+			result += + SH_COEFFICIENTS(4) * SH_C2_0 * xy
+			          - SH_COEFFICIENTS(5) * SH_C2_1 * yz
+			          + SH_COEFFICIENTS(6) * SH_C2_2 * (2.0*zz - xx - yy)
+			          - SH_COEFFICIENTS(7) * SH_C2_3 * xz
+			          + SH_COEFFICIENTS(8) * SH_C2_4 * (xx - yy);
+
+			if (degree >= 3u) {
+				result += - SH_COEFFICIENTS(9)  * SH_C3_0 * y * (3.0*xx - yy)
+				          + SH_COEFFICIENTS(10) * SH_C3_1 * x * yz
+				          - SH_COEFFICIENTS(11) * SH_C3_2 * y * (4.0*zz - xx - yy)
+				          + SH_COEFFICIENTS(12) * SH_C3_3 * z * (2.0*zz - 3.0*xx - 3.0*yy)
+				          - SH_COEFFICIENTS(13) * SH_C3_4 * x * (4.0*zz - xx - yy)
+				          + SH_COEFFICIENTS(14) * SH_C3_5 * z * (xx - yy)
+				          - SH_COEFFICIENTS(15) * SH_C3_6 * x * (xx - 3.0*yy);
+			}
+		}
+	}
+	return max(vec3(0), 0.5 + result);
 }
 
 /** Computes a 2D projected covariance matrix from the given Gaussian parameters. */
@@ -183,8 +189,8 @@ void main() {
 	const int id = int(gl_GlobalInvocationID.x);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
 
-	// _pad0 == 1: clear-only mode (dispatched with 4 workgroups before projection)
-	if (_pad0 == 1u) {
+	// mode == 1: clear-only mode (dispatched with 4 workgroups before projection)
+	if (mode == 1u) {
 		if (id == 0) sort_buffer_size = 0;
 		if (id < 4 * 256) histogram[id] = 0;
 		return;
@@ -245,6 +251,7 @@ void main() {
 	// fewer screen tiles. This has the effect of making the image *slightly* brighter while
 	// minimizing perceptible tile artifacts.
 	float radius = pow(splat_opacity, 0.2) * 2.5*sqrt(max(eigenvalues.x, eigenvalues.y));
+	if (radius < min_radius) return;
 	uvec4 rect_bounds = get_rect(image_pos, radius, grid_size);
 	uint num_tiles_touched = (rect_bounds.z - rect_bounds.x)*(rect_bounds.w - rect_bounds.y);
 
@@ -257,7 +264,7 @@ void main() {
 	RasterizeData data;
 	data.image_pos = image_pos;
 	data.conic = vec3(covariance.z, -covariance.y, covariance.x) / det; // Inverse 2D covariance
-	data.color = vec4(get_color(view_dir, splat.sh_coefficients), splat_opacity);
+	data.color = vec4(get_color(view_dir, splat.sh_coefficients, sh_degree), splat_opacity);
 	data.pos_xy = world_pos.xy;
 	data.pos_z = world_pos.z;
 	data.depth_data = vec4(-view_pos.z, 0.0, 0.0, 0.0);
