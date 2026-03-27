@@ -210,7 +210,7 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 - 本项目中的 shader 实现参考了 [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting)。感谢 2Retr0 公开该项目。
 - 感谢 [@4321ba](https://github.com/4321ba) 提交 [PR #6](https://github.com/ReconWorldLab/godot-gaussian-splatting/pull/6)，为项目补充了编辑器图标、可见性联动处理，以及共享 Gaussian 数据的实例化复用支持。
 - 上游 `2Retr0/GodotGaussianSplatting` 仓库采用 MIT License。若你复用与其实现密切相关的衍生内容，请同时检查并保留相应的上游许可说明。
-- radix sort 相关 shader 文件也保留了各自的上游来源说明，详见对应 shader 文件头部注释。
+- radix sort 实现基于 [jaesung-cs/vulkan_radix_sort](https://github.com/jaesung-cs/vulkan_radix_sort)（MIT License）。Mobile 变体用共享内存原子操作替换了 subgroup 操作，以兼容更多 GPU（如报告错误 `gl_SubgroupSize` 的 Adreno GPU）。
 - Multiview/XR 立体渲染支持参考了 [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting)（基于 aras-p 的 Unity Gaussian Splatting 的 Single Pass Instanced/Multiview 支持）。
 - 光栅化合成路径（Mobile 渲染器支持）参考了 [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays)（Godot 光栅化 CompositorEffect 示例）。
 
@@ -221,6 +221,7 @@ compositor effect 脚本位于 `res://addons/gdgs/runtime/compositor/gaussian_co
 - [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR 参考实现
 - [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — 中心眼排序策略参考
 - [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) — 光栅化 CompositorEffect 参考
+- [jaesung-cs/vulkan_radix_sort](https://github.com/jaesung-cs/vulkan_radix_sort) — GPU radix sort 参考实现（MIT License）
 
 ## 0x0C 许可证
 
