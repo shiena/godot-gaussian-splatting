@@ -191,7 +191,7 @@ This importer is meant for Gaussian Splatting style assets, not generic point cl
 
 - The shader work in this plugin was developed with reference to [2Retr0/GodotGaussianSplatting](https://github.com/2Retr0/GodotGaussianSplatting). Thanks to 2Retr0 for publishing that project.
 - The upstream `2Retr0/GodotGaussianSplatting` repository is published under the MIT License. If you reuse or redistribute closely related derivative work, review and retain the relevant upstream license notice.
-- The radix sort shader files also retain their own upstream attribution headers, as documented in the shader sources.
+- The radix sort implementation is based on [jaesung-cs/vulkan_radix_sort](https://github.com/jaesung-cs/vulkan_radix_sort) (MIT License). The mobile variant replaces subgroup operations with shared-memory atomics for broad GPU compatibility (e.g. Adreno GPUs that report incorrect `gl_SubgroupSize`).
 - Multiview/XR stereo rendering support was developed with reference to [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) (Single Pass Instanced/Multiview support for aras-p's Unity Gaussian Splatting).
 - The raster-based composite path (Mobile renderer support) was developed with reference to [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) (raster-based CompositorEffect demo for Godot).
 
@@ -202,6 +202,7 @@ This importer is meant for Gaussian Splatting style assets, not generic point cl
 - [arghyasur1991/UnityGaussianSplatting](https://github.com/arghyasur1991/UnityGaussianSplatting) — Multiview/XR reference
 - [Nebula: City-Scale 3DGS in VR](https://arxiv.org/abs/2512.20495) — Center-eye sorting strategy reference
 - [BastiaanOlij/RERadialSunRays](https://github.com/BastiaanOlij/RERadialSunRays) — Raster-based CompositorEffect reference
+- [jaesung-cs/vulkan_radix_sort](https://github.com/jaesung-cs/vulkan_radix_sort) — GPU radix sort reference (MIT License)
 
 ## License
 
