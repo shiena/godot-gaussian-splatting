@@ -367,12 +367,12 @@ func _ensure_raster_pipeline(scene_tex: RID) -> void:
 func _resolve_composite_method() -> int:
 	if composite_method != CompositeMethod.AUTO:
 		return composite_method
-	var rendering_method: String = str(ProjectSettings.get_setting(
-		"rendering/renderer/rendering_method", "forward_plus"
-	))
-	if rendering_method == "mobile":
-		return CompositeMethod.RASTER
-	return CompositeMethod.COMPUTE
+	# Use the runtime feature tag instead of ProjectSettings — the tag
+	# reflects the renderer actually active on this device/platform,
+	# which can differ from the project setting on Android.
+	if OS.has_feature("forward_plus"):
+		return CompositeMethod.COMPUTE
+	return CompositeMethod.RASTER
 
 # ---------------------------------------------------------------------------
 # Camera helpers
@@ -446,13 +446,24 @@ func _initialize_shaders() -> void:
 	var resolved := _resolve_composite_method()
 	if resolved == CompositeMethod.RASTER:
 		var raster_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite_raster.glsl")
-		if raster_glsl != null:
+		if raster_glsl == null:
+			push_error("[gdgs] Failed to load raster composite shader file.")
+		else:
 			raster_shader = rd.shader_create_from_spirv(raster_glsl.get_spirv())
+			if not raster_shader.is_valid():
+				push_error("[gdgs] Failed to create raster composite shader from SPIR-V.")
 	else:
 		var compute_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite.glsl")
-		if compute_glsl != null:
+		if compute_glsl == null:
+			push_error("[gdgs] Failed to load compute composite shader file.")
+		else:
 			shader = rd.shader_create_from_spirv(compute_glsl.get_spirv())
-			pipeline = rd.compute_pipeline_create(shader)
+			if not shader.is_valid():
+				push_error("[gdgs] Failed to create compute composite shader from SPIR-V.")
+			else:
+				pipeline = rd.compute_pipeline_create(shader)
+				if not pipeline.is_valid():
+					push_error("[gdgs] Failed to create compute composite pipeline.")
 
 	# Shared resources
 	var sampler_state := RDSamplerState.new()
