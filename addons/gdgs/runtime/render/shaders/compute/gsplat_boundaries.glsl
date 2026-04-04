@@ -14,7 +14,7 @@ layout (std430, set = 0, binding = 1) restrict readonly buffer SortBuffer {
     uint sort_buffer[];
 };
 
-layout (std430, set = 0, binding = 2) restrict writeonly buffer BoundsBuffer {
+layout (std430, set = 0, binding = 2) restrict buffer BoundsBuffer {
     uvec2 bounds_buffer[];
 };
 
@@ -27,8 +27,12 @@ void main() {
     const uint id = gl_GlobalInvocationID.x;
 
     // Mode 1: clear tile_bounds
+    // Use atomicExchange for Adreno cache coherency (see gsplat_projection.glsl)
     if (mode == 1u) {
-        if (id < tile_count) bounds_buffer[id] = uvec2(0, 0);
+        if (id < tile_count) {
+            atomicExchange(bounds_buffer[id].x, 0u);
+            atomicExchange(bounds_buffer[id].y, 0u);
+        }
         return;
     }
 

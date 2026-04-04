@@ -35,8 +35,13 @@ layout (std430, set = 0, binding = 3) restrict writeonly buffer TargetTileSplatB
     float num_tile_splats;
 };
 
-layout(rgba16f, set = 0, binding = 4) uniform restrict writeonly image2D rasterized_image;
-layout(r32f, set = 0, binding = 5) uniform restrict writeonly image2D rasterized_depth;
+// Both eyes' output textures are bound simultaneously to avoid descriptor-set
+// rebinding within the same compute list (works around Adreno driver bugs).
+// In mono mode bindings 6-7 mirror 4-5.
+layout(rgba16f, set = 0, binding = 4) uniform restrict writeonly image2D rasterized_image_0;
+layout(r32f, set = 0, binding = 5) uniform restrict writeonly image2D rasterized_depth_0;
+layout(rgba16f, set = 0, binding = 6) uniform restrict writeonly image2D rasterized_image_1;
+layout(r32f, set = 0, binding = 7) uniform restrict writeonly image2D rasterized_depth_1;
 
 layout(push_constant) restrict readonly uniform PushConstants {
 	float heatmap_factor;
@@ -62,7 +67,7 @@ void main() {
         shared_t = ~0u; // Initialize shared alpha to MAX_UINT
     }
     barrier();
-	const ivec2 dims = imageSize(rasterized_image);
+	const ivec2 dims = imageSize(rasterized_image_0);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
 
     const uvec2 id_block = gl_WorkGroupID.xy;
@@ -137,8 +142,15 @@ void main() {
     vec3 heatmap_color = mix(vec3(0,0,1), vec3(1,0.2,0.2), float(num_splats) * 5e-4) * (1.0 - t) * heatmap_factor;
     if (pixel_in_bounds) {
         float final_alpha = 1.0 - t;
-	    imageStore(rasterized_image, ivec2(pixel), vec4(blended_color + heatmap_color, final_alpha));
-        imageStore(rasterized_depth, ivec2(pixel), vec4(first_hit_depth, 0.0, 0.0, 0.0));
+        vec4 color_out = vec4(blended_color + heatmap_color, final_alpha);
+        vec4 depth_out = vec4(first_hit_depth, 0.0, 0.0, 0.0);
+        if (eye_index == 0u) {
+            imageStore(rasterized_image_0, ivec2(pixel), color_out);
+            imageStore(rasterized_depth_0, ivec2(pixel), depth_out);
+        } else {
+            imageStore(rasterized_image_1, ivec2(pixel), color_out);
+            imageStore(rasterized_depth_1, ivec2(pixel), depth_out);
+        }
     }
 
     // Used for when the user selects a tile to move the cursor to. This is not as accurate as checking

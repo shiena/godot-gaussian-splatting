@@ -67,6 +67,7 @@ var _overlay_mutex := Mutex.new()
 var _overlay_sync_queued := false
 var _overlay_pending_visible := false
 var _overlay_pending_texture_rid := RID()
+const _DEBUG_TAG := "GDGS"
 
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
@@ -121,12 +122,9 @@ func _notification(what: int) -> void:
 func _render_callback(_effect_callback_type: int, render_data: RenderData) -> void:
 	var is_direct_texture_mode := display_mode == DisplayMode.DIRECT_TEXTURE
 	var resolved := _resolve_composite_method()
-	var has_valid_pipeline := false
-	if resolved == CompositeMethod.RASTER:
-		# Raster pipeline is lazily created; shader alone is enough here.
-		has_valid_pipeline = rd != null and raster_shader.is_valid()
-	else:
-		has_valid_pipeline = rd != null and shader.is_valid() and pipeline.is_valid()
+	# At least one composite path must be available.
+	var has_valid_pipeline := rd != null and (
+		raster_shader.is_valid() or (shader.is_valid() and pipeline.is_valid()))
 	if not is_direct_texture_mode and not has_valid_pipeline:
 		_queue_direct_texture_overlay_state(false, RID())
 		return
@@ -148,6 +146,28 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		return
 
 	var view_count: int = scene_buffers.get_view_count()
+	var should_log := Engine.get_frames_drawn() % 60 == 0
+
+	if should_log:
+		var raw_cam_transform: Transform3D = scene_data.get_cam_transform()
+		var raw_cam_projection: Projection = scene_data.get_cam_projection()
+		print("[%s] === frame=%d view_count=%d size=%s ===" % [_DEBUG_TAG, Engine.get_frames_drawn(), view_count, str(size)])
+		print("[%s] cam_transform.origin=%s" % [_DEBUG_TAG, str(raw_cam_transform.origin)])
+		print("[%s] cam_transform.basis.x=%s" % [_DEBUG_TAG, str(raw_cam_transform.basis.x)])
+		print("[%s] cam_transform.basis.y=%s" % [_DEBUG_TAG, str(raw_cam_transform.basis.y)])
+		print("[%s] cam_transform.basis.z=%s" % [_DEBUG_TAG, str(raw_cam_transform.basis.z)])
+		print("[%s] cam_projection.x=%s" % [_DEBUG_TAG, str(raw_cam_projection.x)])
+		print("[%s] cam_projection.y=%s" % [_DEBUG_TAG, str(raw_cam_projection.y)])
+		print("[%s] cam_projection.z=%s" % [_DEBUG_TAG, str(raw_cam_projection.z)])
+		print("[%s] cam_projection.w=%s" % [_DEBUG_TAG, str(raw_cam_projection.w)])
+		for v in view_count:
+			var vp: Projection = scene_data.get_view_projection(v)
+			var eo: Vector3 = scene_data.get_view_eye_offset(v)
+			print("[%s] view[%d] eye_offset=%s" % [_DEBUG_TAG, v, str(eo)])
+			print("[%s] view[%d] view_projection.x=%s" % [_DEBUG_TAG, v, str(vp.x)])
+			print("[%s] view[%d] view_projection.y=%s" % [_DEBUG_TAG, v, str(vp.y)])
+			print("[%s] view[%d] view_projection.z=%s" % [_DEBUG_TAG, v, str(vp.z)])
+			print("[%s] view[%d] view_projection.w=%s" % [_DEBUG_TAG, v, str(vp.w)])
 
 	# Collect camera data for all views
 	var camera_data_array: Array = []
@@ -157,6 +177,19 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 			_queue_direct_texture_overlay_state(false, RID())
 			return
 		camera_data_array.append(camera_data)
+
+	if should_log:
+		for v in camera_data_array.size():
+			var cd: Dictionary = camera_data_array[v]
+			var t: Transform3D = cd["transform"]
+			var p: Projection = cd["projection"]
+			print("[%s] camera_data[%d] transform.origin=%s" % [_DEBUG_TAG, v, str(t.origin)])
+			print("[%s] camera_data[%d] transform.basis.z=%s" % [_DEBUG_TAG, v, str(t.basis.z)])
+			print("[%s] camera_data[%d] projection.x=%s" % [_DEBUG_TAG, v, str(p.x)])
+			print("[%s] camera_data[%d] projection.y=%s" % [_DEBUG_TAG, v, str(p.y)])
+			print("[%s] camera_data[%d] projection.z=%s" % [_DEBUG_TAG, v, str(p.z)])
+			print("[%s] camera_data[%d] projection.w=%s" % [_DEBUG_TAG, v, str(p.w)])
+			print("[%s] camera_data[%d] world_position=%s" % [_DEBUG_TAG, v, str(cd["world_position"])])
 
 	# Render all views at once (projection + sort once, render per eye)
 	var gs_scale := clampf(render_scale, 0.25, 1.0)
@@ -178,11 +211,20 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 			_queue_direct_texture_overlay_state(false, RID())
 		return
 
-	# Composite each view
-	if resolved == CompositeMethod.RASTER:
+	# Composite each view.
+	# In multiview (VR), always use the raster path — compute imageStore
+	# to texture-array layer views is unreliable on some drivers/backends.
+	var use_raster := resolved == CompositeMethod.RASTER or view_count >= 2
+	if use_raster and raster_shader.is_valid():
 		_composite_raster(view_count, gsplat_views, scene_buffers, camera_data_array, size)
-	else:
+	elif not use_raster and shader.is_valid() and pipeline.is_valid():
 		_composite_compute(view_count, gsplat_views, scene_buffers, camera_data_array, size)
+	else:
+		# Fallback: try whichever path has valid resources
+		if raster_shader.is_valid():
+			_composite_raster(view_count, gsplat_views, scene_buffers, camera_data_array, size)
+		elif shader.is_valid() and pipeline.is_valid():
+			_composite_compute(view_count, gsplat_views, scene_buffers, camera_data_array, size)
 
 	if not is_direct_texture_mode:
 		_queue_direct_texture_overlay_state(false, RID())
@@ -206,9 +248,11 @@ func _composite_compute(view_count: int, gsplat_views: Array, scene_buffers: Ren
 
 		var use_scene_depth := _debug_view_needs_scene_depth(debug_view)
 		var scene_depth_tex: RID = _get_scene_depth_texture(scene_buffers, view)
-		if use_scene_depth and not scene_depth_tex.is_valid():
-			continue
+		# If scene depth is unavailable for this view (common for the right eye
+		# in mobile multiview), disable depth testing instead of skipping the
+		# entire view — otherwise the composite is never drawn for that eye.
 		if not scene_depth_tex.is_valid():
+			use_scene_depth = false
 			scene_depth_tex = fallback_depth_texture
 		if not scene_depth_tex.is_valid():
 			continue
@@ -278,9 +322,11 @@ func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: Rend
 
 		var use_scene_depth := _debug_view_needs_scene_depth(debug_view)
 		var scene_depth_tex: RID = _get_scene_depth_texture(scene_buffers, view)
-		if use_scene_depth and not scene_depth_tex.is_valid():
-			continue
+		# If scene depth is unavailable for this view (common for the right eye
+		# in mobile multiview), disable depth testing instead of skipping the
+		# entire view — otherwise the composite is never drawn for that eye.
 		if not scene_depth_tex.is_valid():
+			use_scene_depth = false
 			scene_depth_tex = fallback_depth_texture
 		if not scene_depth_tex.is_valid():
 			continue
@@ -398,10 +444,27 @@ func _get_camera_data(scene_data: RenderSceneDataRD, view: int) -> Dictionary:
 	var camera_projection: Projection = scene_data.get_view_projection(view)
 	var world_position: Vector3 = camera_transform.origin
 
-	# Apply eye offset to transform and world position (XR stereo)
+	# Build per-eye camera data using the raw per-eye projection.
+	#
+	# get_view_projection(v) = raw_proj[v] * Projection(view_offset[v].inverse())
+	# where view_offset[v] ≈ translate(eye_offset).
+	#
+	# The baked-in eye_offset causes projection[3][3] != 0, which introduces
+	# precision issues on Adreno GPUs (Quest native).
+	#
+	# Fix: undo the eye_offset from the projection, and apply it to the
+	# view matrix instead (per-eye view + clean projection).
 	if scene_data.has_method("get_view_eye_offset"):
 		var eye_offset: Vector3 = scene_data.get_view_eye_offset(view)
-		camera_transform.origin += eye_offset
+		if eye_offset != Vector3.ZERO and scene_data.has_method("get_view_projection"):
+			# Extract raw per-eye projection by undoing the eye_offset:
+			#   raw_proj[v] = get_view_projection(v) * Projection(view_offset)
+			var view_offset := Transform3D(Basis.IDENTITY, eye_offset)
+			camera_projection = scene_data.get_view_projection(view) * Projection(view_offset)
+		elif scene_data.has_method("get_view_projection"):
+			camera_projection = scene_data.get_view_projection(view)
+		# Apply eye offset to transform → per-eye view matrix
+		camera_transform.origin += camera_transform.basis * eye_offset
 		world_position = camera_transform.origin
 
 
@@ -449,29 +512,18 @@ func _initialize_shaders() -> void:
 	if not rd:
 		return
 
-	# Only load the composite shader for the active method to avoid
-	# allocating GPU resources that will never be used.
-	var resolved := _resolve_composite_method()
-	if resolved == CompositeMethod.RASTER:
-		var raster_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite_raster.glsl")
-		if raster_glsl == null:
-			push_error("[gdgs] Failed to load raster composite shader file.")
-		else:
-			raster_shader = rd.shader_create_from_spirv(raster_glsl.get_spirv())
-			if not raster_shader.is_valid():
-				push_error("[gdgs] Failed to create raster composite shader from SPIR-V.")
-	else:
-		var compute_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite.glsl")
-		if compute_glsl == null:
-			push_error("[gdgs] Failed to load compute composite shader file.")
-		else:
-			shader = rd.shader_create_from_spirv(compute_glsl.get_spirv())
-			if not shader.is_valid():
-				push_error("[gdgs] Failed to create compute composite shader from SPIR-V.")
-			else:
-				pipeline = rd.compute_pipeline_create(shader)
-				if not pipeline.is_valid():
-					push_error("[gdgs] Failed to create compute composite pipeline.")
+	# Load both composite shaders so that the method can be switched at
+	# runtime (e.g. AUTO falls back to raster in VR multiview where
+	# compute imageStore to texture-array layer views is unreliable).
+	var compute_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite.glsl")
+	if compute_glsl != null:
+		shader = rd.shader_create_from_spirv(compute_glsl.get_spirv())
+		if shader.is_valid():
+			pipeline = rd.compute_pipeline_create(shader)
+
+	var raster_glsl: RDShaderFile = load("res://addons/gdgs/runtime/compositor/shaders/gaussian_composite_raster.glsl")
+	if raster_glsl != null:
+		raster_shader = rd.shader_create_from_spirv(raster_glsl.get_spirv())
 
 	# Shared resources
 	var nearest_state := RDSamplerState.new()

@@ -190,9 +190,13 @@ void main() {
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
 
 	// mode == 1: clear-only mode (dispatched with 4 workgroups before projection)
+	// Use atomicExchange instead of plain writes — plain stores may not be
+	// visible to atomicAdd in the next dispatch on Adreno GPUs even with a
+	// compute barrier, because the atomic unit and the L1 store path can
+	// use separate caches.
 	if (mode == 1u) {
-		if (id == 0) sort_buffer_size = 0;
-		if (id < 4 * 256) histogram[id] = 0;
+		if (id == 0) atomicExchange(sort_buffer_size, 0u);
+		if (id < 4 * 256) atomicExchange(histogram[id], 0u);
 		return;
 	}
 
@@ -252,7 +256,29 @@ void main() {
 	// minimizing perceptible tile artifacts.
 	float radius = pow(splat_opacity, 0.2) * 2.5*sqrt(max(eigenvalues.x, eigenvalues.y));
 	if (radius < min_radius) return;
+
+	// --- RIGHT EYE PROJECTION (stereo only) ---
+	// Compute right eye clip position + image_pos early so that the tile rect
+	// can be expanded to cover both eyes.  The 2D covariance difference between
+	// eyes is negligible for typical IPD, so it is shared from the left eye.
+	float clip_w_right = clip_pos.w; // default to left eye for mono
+	vec2 image_pos_right = image_pos;
+	vec4 view_pos_right = view_pos;
+	if (view_count >= 2) {
+		view_pos_right = view_matrix_right * world_pos;
+		vec4 clip_pos_right = projection_matrix_right * view_pos_right;
+		clip_w_right = clip_pos_right.w;
+		vec3 ndc_pos_right = clip_pos_right.xyz / clip_pos_right.w;
+		image_pos_right = ((ndc_pos_right.xy + 1.0)*0.5 - vec2(1,0.75)*(1.0 - time_factor)) * (dims - 1);
+	}
+
+	// Tile rect: union of both eyes' rects in stereo so that every splat
+	// appears in the correct tiles for both views.
 	uvec4 rect_bounds = get_rect(image_pos, radius, grid_size);
+	if (view_count >= 2) {
+		uvec4 rect_right = get_rect(image_pos_right, radius, grid_size);
+		rect_bounds = uvec4(min(rect_bounds.xy, rect_right.xy), max(rect_bounds.zw, rect_right.zw));
+	}
 	uint num_tiles_touched = (rect_bounds.z - rect_bounds.x)*(rect_bounds.w - rect_bounds.y);
 
 	if (num_tiles_touched == 0 /*|| num_tiles_touched > grid_size.x*grid_size.y/3*/) return;
@@ -270,17 +296,7 @@ void main() {
 	data.depth_data = vec4(-view_pos.z, 0.0, 0.0, 0.0);
 	culled_buffer[id * view_count] = data;
 
-	// --- RIGHT EYE PROJECTION (stereo only) ---
-	// Copy left eye data and replace clip position + depth. The 2D covariance
-	// difference between eyes is negligible for typical IPD.
-	float clip_w_right = clip_pos.w; // default to left eye for mono
 	if (view_count >= 2) {
-		vec4 view_pos_right = view_matrix_right * world_pos;
-		vec4 clip_pos_right = projection_matrix_right * view_pos_right;
-		clip_w_right = clip_pos_right.w;
-		vec3 ndc_pos_right = clip_pos_right.xyz / clip_pos_right.w;
-		vec2 image_pos_right = ((ndc_pos_right.xy + 1.0)*0.5 - vec2(1,0.75)*(1.0 - time_factor)) * (dims - 1);
-
 		RasterizeData data_right = data;
 		data_right.image_pos = image_pos_right;
 		data_right.depth_data = vec4(-view_pos_right.z, 0.0, 0.0, 0.0);

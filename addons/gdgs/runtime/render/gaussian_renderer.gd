@@ -5,6 +5,7 @@ class_name GaussianRenderer
 const RenderingDeviceContext := preload("res://addons/gdgs/runtime/render/gaussian_rendering_device_context.gd")
 const RADIX := 256
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
+const _DEBUG_TAG := "GDGS"
 
 ## Multiview render. Runs projection + sort once, then renders per eye.
 ## camera_data_array: Array of {"transform": Transform3D, "projection": Projection, "world_position": Vector3}
@@ -87,6 +88,36 @@ func _rasterize_state(state, point_count: int) -> void:
 	if state.context == null:
 		return
 
+	var should_log := Engine.get_frames_drawn() % 60 == 0
+
+	if should_log:
+		print("[%s] --- UBO data --- point_count=%d view_count=%d tex=%s" % [
+			_DEBUG_TAG, point_count, state.view_count, str(state.texture_size)])
+		print("[%s] UBO camera_world_pos=%s" % [_DEBUG_TAG, str(state.camera_world_position)])
+		# Log view matrix (should be cam_transform.inverse — NOT identity if head tracking works)
+		var vm: Projection = state.camera_view
+		print("[%s] UBO view_matrix row0=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vm.x[0], vm.y[0], vm.z[0], vm.w[0]])
+		print("[%s] UBO view_matrix row1=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vm.x[1], vm.y[1], vm.z[1], vm.w[1]])
+		print("[%s] UBO view_matrix row2=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vm.x[2], vm.y[2], vm.z[2], vm.w[2]])
+		print("[%s] UBO view_matrix row3=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vm.x[3], vm.y[3], vm.z[3], vm.w[3]])
+		# Log projection matrix
+		var pm: Projection = state.camera_projection
+		print("[%s] UBO projection row0=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pm.x[0], pm.y[0], pm.z[0], pm.w[0]])
+		print("[%s] UBO projection row1=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pm.x[1], pm.y[1], pm.z[1], pm.w[1]])
+		print("[%s] UBO projection row2=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pm.x[2], pm.y[2], pm.z[2], pm.w[2]])
+		print("[%s] UBO projection row3=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pm.x[3], pm.y[3], pm.z[3], pm.w[3]])
+		if state.view_count >= 2:
+			var vmr: Projection = state.camera_view_right
+			print("[%s] UBO view_matrix_right row0=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vmr.x[0], vmr.y[0], vmr.z[0], vmr.w[0]])
+			print("[%s] UBO view_matrix_right row3=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, vmr.x[3], vmr.y[3], vmr.z[3], vmr.w[3]])
+			var pmr: Projection = state.camera_projection_right
+			print("[%s] UBO projection_right row0=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pmr.x[0], pmr.y[0], pmr.z[0], pmr.w[0]])
+			print("[%s] UBO projection_right row3=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pmr.x[3], pmr.y[3], pmr.z[3], pmr.w[3]])
+		# Check if view_matrix is identity (would cause "stuck to viewport")
+		var is_identity := is_equal_approx(vm.x[0], 1.0) and is_equal_approx(vm.y[1], 1.0) and is_equal_approx(vm.z[2], 1.0) and is_equal_approx(vm.w[3], 1.0) and is_equal_approx(vm.w[0], 0.0) and is_equal_approx(vm.w[1], 0.0) and is_equal_approx(vm.w[2], 0.0)
+		if is_identity:
+			push_warning("[%s] WARNING: view_matrix is IDENTITY — head tracking not applied!" % _DEBUG_TAG)
+
 	var ubo_data := RenderingDeviceContext.create_buffer_data(
 		[
 			state.camera_world_position.x,
@@ -104,31 +135,20 @@ func _rasterize_state(state, point_count: int) -> void:
 		+ _projection_to_column_major_floats(state.camera_projection_right)
 	)
 	state.context.device.buffer_update(state.descriptors["uniforms"].rid, 0, ubo_data.size(), ubo_data)
-	# Use buffer_update with zero data instead of buffer_clear.
-	# buffer_clear uses vkCmdFillBuffer (transfer op) which may lack a
-	# proper transfer→compute barrier on some mobile Vulkan drivers.
-	# buffer_update goes through a staging-buffer path that is more
-	# reliably synchronised with subsequent compute dispatches.
-	var histogram_clear_size: int = 4 + 4 * RADIX * 4
-	var zero_histogram := PackedByteArray()
-	zero_histogram.resize(histogram_clear_size)
-	zero_histogram.fill(0)
-	state.context.device.buffer_update(state.descriptors["histogram"].rid, 0, histogram_clear_size, zero_histogram)
-	var tile_bounds_clear_size: int = state.tile_dims.x * state.tile_dims.y * 2 * 4
-	var zero_tile_bounds := PackedByteArray()
-	zero_tile_bounds.resize(tile_bounds_clear_size)
-	zero_tile_bounds.fill(0)
-	state.context.device.buffer_update(state.descriptors["tile_bounds"].rid, 0, tile_bounds_clear_size, zero_tile_bounds)
-
-	# All compute work runs in a single compute list so that
-	# compute_list_add_barrier() (called after every dispatch inside
-	# create_pipeline) guarantees correct memory ordering on mobile GPUs
-	# where inter-list synchronisation is not implicit.
-	var compute_list: int = state.context.compute_list_begin()
-
-	# Clear histogram inside compute list (avoids transfer→compute barrier issues)
+	# --- Clear pass (separate compute list) ---
+	# On Adreno GPUs, compute_list_add_barrier() between dispatches within a
+	# single compute list does NOT reliably flush atomic/SSBO writes.
+	# Splitting clear into its own compute list forces a full queue submission
+	# boundary, which provides stronger synchronisation guarantees.
+	var clear_list: int = state.context.compute_list_begin()
 	var clear_push_constant := RenderingDeviceContext.create_push_constant([1, 0, 0.0, 0])
-	state.pipelines["gsplat_projection_clear"].call(state.context, compute_list, clear_push_constant)
+	state.pipelines["gsplat_projection_clear"].call(state.context, clear_list, clear_push_constant)
+	var tile_clear_push_constant := RenderingDeviceContext.create_push_constant([1, state.tile_count])
+	state.pipelines["gsplat_tile_bounds_clear"].call(state.context, clear_list, tile_clear_push_constant)
+	state.context.compute_list_end()
+
+	# --- Main compute list (projection → sort → boundaries → render) ---
+	var compute_list: int = state.context.compute_list_begin()
 
 	# Projection pass — runs once for all views
 	var projection_push_constant := RenderingDeviceContext.create_push_constant([0, state.sh_degree, state.min_radius, 0])
@@ -145,22 +165,17 @@ func _rasterize_state(state, point_count: int) -> void:
 		state.pipelines["radix_sort_spine"].call(state.context, compute_list, sort_push_constant)
 		state.pipelines["radix_sort_downsweep"].call(state.context, compute_list, sort_push_constant)
 
-	# Clear tile_bounds inside compute list (avoids transfer→compute barrier issues)
-	var tile_clear_push_constant := RenderingDeviceContext.create_push_constant([1, state.tile_count])
-	state.pipelines["gsplat_tile_bounds_clear"].call(state.context, compute_list, tile_clear_push_constant)
-
 	# Boundaries pass — runs once
 	var boundaries_push_constant := RenderingDeviceContext.create_push_constant([0, 0])
 	state.pipelines["gsplat_boundaries"].call(state.context, compute_list, boundaries_push_constant)
 
-	# Render pass — runs once per eye with per-view output textures
+	# Render pass — runs once per eye
 	for eye_index in range(state.view_count):
 		var render_push_constant := RenderingDeviceContext.create_push_constant([
 			0.0, -1, state.depth_capture_alpha, eye_index, state.view_count, 0, 0, 0
 		])
 		state.pipelines["gsplat_render"].call(
-			state.context, compute_list, render_push_constant,
-			[state.render_sets[eye_index]]
+			state.context, compute_list, render_push_constant
 		)
 
 	state.context.compute_list_end()

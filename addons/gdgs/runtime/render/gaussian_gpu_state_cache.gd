@@ -139,22 +139,32 @@ func rebuild_gpu_state(state, point_count: int, unique_data_size: int, instance_
 	state.descriptors["tile_bounds"] = state.context.create_storage_buffer(state.tile_dims.x * state.tile_dims.y * 2 * 4)
 	state.descriptors["tile_splat_pos"] = state.context.create_storage_buffer(4 * 4)
 
-	# Create per-view render/depth textures and descriptor sets
+	# Create per-view render/depth textures
 	state.render_sets.clear()
 	for v in range(state.view_count):
 		var rt_key := "render_texture_%d" % v
 		var dt_key := "depth_texture_%d" % v
 		state.descriptors[rt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 		state.descriptors[dt_key] = state.context.create_texture(state.texture_size, RenderingDevice.DATA_FORMAT_R32_SFLOAT)
-		var render_set_v: RID = state.context.create_descriptor_set([
-			state.descriptors["culled_splats"],
-			state.descriptors["sort_values"],
-			state.descriptors["tile_bounds"],
-			state.descriptors["tile_splat_pos"],
-			state.descriptors[rt_key],
-			state.descriptors[dt_key]
-		], state.shaders["render"], 0)
-		state.render_sets.append(render_set_v)
+
+	# Single render descriptor set with ALL eye textures bound simultaneously.
+	# This avoids descriptor-set rebinding within the same compute list, which
+	# is unreliable on Adreno GPUs.  In mono mode, bindings 6-7 mirror 4-5.
+	var rt0 = state.descriptors["render_texture_0"]
+	var dt0 = state.descriptors["depth_texture_0"]
+	var rt1 = state.descriptors.get("render_texture_1", rt0)
+	var dt1 = state.descriptors.get("depth_texture_1", dt0)
+	var render_set: RID = state.context.create_descriptor_set([
+		state.descriptors["culled_splats"],   # binding 0
+		state.descriptors["sort_values"],     # binding 1
+		state.descriptors["tile_bounds"],     # binding 2
+		state.descriptors["tile_splat_pos"],  # binding 3
+		rt0,                                  # binding 4: eye 0 color
+		dt0,                                  # binding 5: eye 0 depth
+		rt1,                                  # binding 6: eye 1 color (mono: same as 4)
+		dt1,                                  # binding 7: eye 1 depth (mono: same as 5)
+	], state.shaders["render"], 0)
+	state.render_sets.append(render_set)
 
 	var projection_set: RID = state.context.create_descriptor_set([
 		state.descriptors["splats"],
@@ -204,6 +214,8 @@ func rebuild_gpu_state(state, point_count: int, unique_data_size: int, instance_
 	# Tile bounds clear pipeline: boundaries shader with mode=1
 	state.pipelines["gsplat_tile_bounds_clear"] = state.context.create_pipeline([tile_clear_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
 	state.pipelines["gsplat_boundaries"] = state.context.create_pipeline([boundaries_dispatch_x, 1, 1], [boundaries_set], state.shaders["boundaries"])
+	# Single render pipeline — all eye textures are in one descriptor set to
+	# avoid rebinding on Adreno.  The eye_index push constant selects output.
 	state.pipelines["gsplat_render"] = state.context.create_pipeline([state.tile_dims.x, state.tile_dims.y, 1], [state.render_sets[0]], state.shaders["render"])
 
 	# Store tile_count for per-frame clear dispatch
