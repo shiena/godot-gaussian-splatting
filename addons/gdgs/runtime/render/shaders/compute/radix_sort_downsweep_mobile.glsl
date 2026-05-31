@@ -18,6 +18,7 @@ layout (local_size_x = WORKGROUP_SIZE) in;
 
 layout (std430, set = 0, binding = 0) restrict readonly buffer Histogram {
     uint element_count;
+    uint sort_overflow_count;
     uint global_histogram[4*RADIX];
     uint partition_histogram[PARTITION_SIZE*RADIX];
 };

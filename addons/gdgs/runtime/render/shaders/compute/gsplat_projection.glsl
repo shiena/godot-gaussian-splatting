@@ -75,7 +75,8 @@ layout(std430, set = 0, binding = 1) restrict writeonly buffer CulledBuffer {
 
 layout (std430, set = 0, binding = 2) restrict buffer Histograms {
 	uint sort_buffer_size;
-    uint histogram[];
+	uint sort_overflow_count;
+	uint histogram[];
 };
 
 layout (std430, set = 0, binding = 3) restrict writeonly buffer SortKeysBuffer {
@@ -111,6 +112,10 @@ layout (std140, set = 0, binding = 8) restrict uniform Uniforms {
 	ivec2 dims; // Texture size
 	int point_count;
 	int view_count; // 1 = mono, 2 = stereo
+	int sort_capacity;
+	int _pad1;
+	int _pad2;
+	int _pad3;
 	mat4 view_matrix;
 	mat4 projection_matrix;
 	mat4 view_matrix_right;
@@ -185,6 +190,24 @@ uvec4 get_rect(in vec2 image_pos, in float radius, in uvec2 grid_size) {
 		clamp(ceil((image_pos + radius) / TILE_SIZE), vec2(0), grid_size));
 }
 
+bool reserve_sort_slots(uint count, out uint offset) {
+	uint capacity = uint(max(sort_capacity, 0));
+	if (count == 0u) return false;
+	if (count > capacity) {
+		atomicAdd(sort_overflow_count, count);
+		return false;
+	}
+
+	offset = atomicAdd(sort_buffer_size, count);
+	uint next = offset + count;
+	if (next > capacity || next < offset) {
+		atomicAdd(sort_overflow_count, count);
+		atomicMin(sort_buffer_size, capacity);
+		return false;
+	}
+	return true;
+}
+
 void main() {
 	const int id = int(gl_GlobalInvocationID.x);
 	const uvec2 grid_size = (dims + TILE_SIZE - 1) / TILE_SIZE;
@@ -196,6 +219,7 @@ void main() {
 	// use separate caches.
 	if (mode == 1u) {
 		if (id == 0) atomicExchange(sort_buffer_size, 0u);
+		if (id == 1) atomicExchange(sort_overflow_count, 0u);
 		if (id < 4 * 256) atomicExchange(histogram[id], 0u);
 		return;
 	}
@@ -283,8 +307,10 @@ void main() {
 
 	if (num_tiles_touched == 0 /*|| num_tiles_touched > grid_size.x*grid_size.y/3*/) return;
 
-	const uint buffer_size = atomicAdd(sort_buffer_size, num_tiles_touched);
-	uint sort_buffer_offset = buffer_size;
+	uint sort_buffer_offset = 0u;
+	if (!reserve_sort_slots(num_tiles_touched, sort_buffer_offset)) {
+		return;
+	}
 	vec3 view_dir = normalize(world_pos.xyz - camera_pos);
 
 	RasterizeData data;

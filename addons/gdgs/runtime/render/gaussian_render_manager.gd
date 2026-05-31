@@ -46,7 +46,8 @@ func render_for_compositor_multiview(
 	camera_data_array: Array,
 	depth_capture_alpha: float = 0.5,
 	sh_degree: int = 3,
-	min_radius: float = 0.0
+	min_radius: float = 0.0,
+	debug_logging: bool = false
 ) -> Dictionary:
 	return _renderer.render_for_compositor_multiview(
 		_gpu_state_cache,
@@ -55,7 +56,8 @@ func render_for_compositor_multiview(
 		camera_data_array,
 		depth_capture_alpha,
 		sh_degree,
-		min_radius
+		min_radius,
+		debug_logging
 	)
 
 func _cleanup_on_render_thread() -> void:

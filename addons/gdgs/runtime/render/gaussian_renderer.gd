@@ -17,7 +17,8 @@ func render_for_compositor_multiview(
 	camera_data_array: Array,
 	depth_capture_alpha: float = 0.5,
 	sh_degree: int = 3,
-	min_radius: float = 0.0
+	min_radius: float = 0.0,
+	debug_logging: bool = false
 ) -> Dictionary:
 	state_cache.flush_pending_cleanup()
 
@@ -71,7 +72,7 @@ func render_for_compositor_multiview(
 	if state.needs_instance_upload:
 		state_cache.upload_instance_transforms(state, scene_registry.get_instance_transforms_byte())
 
-	_rasterize_state(state, point_count)
+	_rasterize_state(state, point_count, debug_logging)
 
 	var views := []
 	for v in range(state.view_count):
@@ -84,11 +85,11 @@ func render_for_compositor_multiview(
 			})
 	return {"views": views} if views.size() == state.view_count else {}
 
-func _rasterize_state(state, point_count: int) -> void:
+func _rasterize_state(state, point_count: int, debug_logging: bool) -> void:
 	if state.context == null:
 		return
 
-	var should_log := Engine.get_frames_drawn() % 60 == 0
+	var should_log := debug_logging and Engine.get_frames_drawn() % 60 == 0
 
 	if should_log:
 		print("[%s] --- UBO data --- point_count=%d view_count=%d tex=%s" % [
@@ -113,6 +114,7 @@ func _rasterize_state(state, point_count: int) -> void:
 			var pmr: Projection = state.camera_projection_right
 			print("[%s] UBO projection_right row0=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pmr.x[0], pmr.y[0], pmr.z[0], pmr.w[0]])
 			print("[%s] UBO projection_right row3=[%.4f, %.4f, %.4f, %.4f]" % [_DEBUG_TAG, pmr.x[3], pmr.y[3], pmr.z[3], pmr.w[3]])
+		print("[%s] sort_capacity=%d" % [_DEBUG_TAG, state.sort_capacity])
 		# Check if view_matrix is identity (would cause "stuck to viewport")
 		var is_identity := is_equal_approx(vm.x[0], 1.0) and is_equal_approx(vm.y[1], 1.0) and is_equal_approx(vm.z[2], 1.0) and is_equal_approx(vm.w[3], 1.0) and is_equal_approx(vm.w[0], 0.0) and is_equal_approx(vm.w[1], 0.0) and is_equal_approx(vm.w[2], 0.0)
 		if is_identity:
@@ -127,7 +129,11 @@ func _rasterize_state(state, point_count: int) -> void:
 			state.texture_size.x,
 			state.texture_size.y,
 			point_count,
-			state.view_count
+			state.view_count,
+			state.sort_capacity,
+			0,
+			0,
+			0
 		]
 		+ _projection_to_column_major_floats(state.camera_view)
 		+ _projection_to_column_major_floats(state.camera_projection)
@@ -179,11 +185,28 @@ func _rasterize_state(state, point_count: int) -> void:
 		)
 
 	state.context.compute_list_end()
+	if should_log:
+		_log_sort_stats(state)
 
 func _update_camera(state, camera_transform: Transform3D, camera_projection: Projection, camera_world_position: Vector3) -> void:
 	state.camera_view = Projection(camera_transform.affine_inverse())
 	state.camera_projection = camera_projection
 	state.camera_world_position = camera_world_position
+
+func _log_sort_stats(state) -> void:
+	if state.context == null or not state.descriptors.has("histogram"):
+		return
+	if not state.context.device.has_method("buffer_get_data"):
+		return
+	var histogram_rid: RID = state.descriptors["histogram"].rid
+	var data: PackedByteArray = state.context.device.buffer_get_data(histogram_rid, 0, 8)
+	if data.size() < 8:
+		return
+	var sort_size := data.decode_u32(0)
+	var overflow_count := data.decode_u32(4)
+	print("[%s] sort_buffer_size=%d sort_overflow_count=%d capacity=%d" % [
+		_DEBUG_TAG, sort_size, overflow_count, state.sort_capacity
+	])
 
 func _projection_to_column_major_floats(matrix: Projection) -> Array:
 	return [

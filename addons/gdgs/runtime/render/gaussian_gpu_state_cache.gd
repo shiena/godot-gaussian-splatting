@@ -14,8 +14,8 @@ const FLOATS_PER_SPLAT := 60
 const FLOATS_PER_CULLED_SPLAT := 16
 const BYTES_PER_FLOAT := 4
 const MAX_SORT_ELEMENTS_PER_SPLAT := 10
-# UBO layout: vec3+float(16) + ivec2+int+int(16) + 4x mat4(256) = 288 bytes
-const UBO_SIZE := 288
+# UBO layout: vec3+float(16) + ivec2+int+int(16) + ivec4(16) + 4x mat4(256) = 304 bytes
+const UBO_SIZE := 304
 
 const SHADER_PATH_PROJECTION := "res://addons/gdgs/runtime/render/shaders/compute/gsplat_projection.glsl"
 const SHADER_PATH_RADIX_UPSWEEP_DESKTOP := "res://addons/gdgs/runtime/render/shaders/compute/radix_sort_upsweep_forward.glsl"
@@ -44,6 +44,7 @@ class RenderState:
 	var depth_capture_alpha := 0.5
 	var sh_degree := 3
 	var min_radius := 0.0
+	var sort_capacity := 0
 	var needs_gpu_rebuild := true
 	var needs_splat_upload := false
 	var needs_instance_upload := false
@@ -130,7 +131,9 @@ func rebuild_gpu_state(state, point_count: int, unique_data_size: int, instance_
 	state.descriptors["splats"] = state.context.create_storage_buffer(unique_data_size)
 	state.descriptors["culled_splats"] = state.context.create_storage_buffer(point_count * state.view_count * FLOATS_PER_CULLED_SPLAT * BYTES_PER_FLOAT)
 	state.descriptors["grid_dimensions"] = state.context.create_storage_buffer(6 * 4, block_dims.to_byte_array(), RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
-	state.descriptors["histogram"] = state.context.create_storage_buffer(4 + (1 + 4 * RADIX + num_partitions * RADIX) * 4)
+	state.sort_capacity = num_sort_elements_max
+	# Header: sort_buffer_size + sort_overflow_count, then radix histograms.
+	state.descriptors["histogram"] = state.context.create_storage_buffer(8 + (4 * RADIX + num_partitions * RADIX) * 4)
 	state.descriptors["sort_keys"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["sort_values"] = state.context.create_storage_buffer(num_sort_elements_max * 4 * 2)
 	state.descriptors["splat_instance_ids"] = state.context.create_storage_buffer(point_count * 4 * 2)

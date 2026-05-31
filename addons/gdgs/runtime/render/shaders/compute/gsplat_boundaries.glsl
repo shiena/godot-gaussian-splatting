@@ -7,6 +7,7 @@ layout (local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 layout (std430, set = 0, binding = 0) restrict readonly buffer Histograms {
     uint sort_buffer_size;
+    uint sort_overflow_count;
     uint histogram[];
 };
 

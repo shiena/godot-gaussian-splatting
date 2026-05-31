@@ -15,6 +15,7 @@ layout (local_size_x = WORKGROUP_SIZE) in;
 
 layout (std430, set = 0, binding = 0) restrict buffer Histogram {
     uint element_count;
+    uint sort_overflow_count;
     uint global_histogram[4*RADIX];                 // (4, RADIX)
     uint partition_histogram[PARTITION_SIZE*RADIX]; // (PARTITION_SIZE, RADIX)
 };
@@ -33,12 +34,12 @@ shared uint local_histogram[RADIX];
 void main() {
     uint index = gl_LocalInvocationIndex;
 
-    uint element_count = element_count;
+    uint ec = element_count;
     uint partition_index = gl_WorkGroupID.x;
     uint partition_start = partition_index * PARTITION_SIZE;
 
     // Discard all workgroup invocations
-    if (partition_start >= element_count) return;
+    if (partition_start >= ec) return;
 
     if (index < RADIX) local_histogram[index] = 0;
     barrier();
@@ -46,7 +47,7 @@ void main() {
     // Local histogram
     for (int i = 0; i < PARTITION_DIVISION; ++i) {
         uint key_index = partition_start + WORKGROUP_SIZE * i + index;
-        uint key = key_index < element_count ? keys[key_index + in_offset] : 0xffffffff;
+        uint key = key_index < ec ? keys[key_index + in_offset] : 0xffffffff;
         uint radix = bitfieldExtract(key, 8 * pass, 8);
         atomicAdd(local_histogram[radix], 1);
     }

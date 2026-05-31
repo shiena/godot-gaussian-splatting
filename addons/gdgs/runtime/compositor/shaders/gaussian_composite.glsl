@@ -19,7 +19,7 @@ layout(push_constant, std430) uniform Params {
     float depth_test_min_alpha;
     float debug_view;
     float use_scene_depth;
-    float _pad0;
+    float view_index; // 0 = left/mono, 1 = right
     mat4 inv_projection;
 } p;
 
@@ -111,6 +111,17 @@ void main() {
     }
     if (debug_view == 5) {
         imageStore(scene_tex, pixel, depth_rejected ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 1.0, 0.0, 1.0));
+        return;
+    }
+    if (debug_view == 6) {
+        // EYE_TAG: left=red, right=green (mono shows red)
+        imageStore(scene_tex, pixel, (p.view_index < 0.5) ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 1.0, 0.0, 1.0));
+        return;
+    }
+    if (debug_view == 7) {
+        // GS_DEPTH_PER_EYE: depth ramp tinted by eye
+        float d = gsplat_view_depth >= INVALID_DEPTH ? 0.0 : clamp(gsplat_view_depth / 20.0, 0.0, 1.0);
+        imageStore(scene_tex, pixel, (p.view_index < 0.5) ? vec4(d, 0.0, 0.0, 1.0) : vec4(0.0, d, 0.0, 1.0));
         return;
     }
 

@@ -19,6 +19,7 @@ layout (local_size_x = WORKGROUP_SIZE) in;
 
 layout (std430, set = 0, binding = 0) restrict readonly buffer Histogram {
     uint element_count;
+    uint sort_overflow_count;
     uint global_histogram[4*RADIX];                 // (4, RADIX)
     uint partition_histogram[PARTITION_SIZE*RADIX]; // (PARTITION_SIZE, RADIX)
 };
@@ -48,9 +49,9 @@ void main() {
 
     uint partition_index = gl_WorkGroupID.x;
     uint partition_start = partition_index * PARTITION_SIZE;
-    uint element_count = element_count;
+    uint ec = element_count;
 
-    if (partition_start >= element_count) return;
+    if (partition_start >= ec) return;
 
     if (index < RADIX) {
         for (int i = 0; i < gl_NumSubgroups; ++i) {
@@ -68,9 +69,9 @@ void main() {
     uint local_values[PARTITION_DIVISION];
     for (int i = 0; i < PARTITION_DIVISION; ++i) {
         uint key_index = partition_start + (PARTITION_DIVISION * gl_SubgroupSize) * subgroup_index + i * gl_SubgroupSize + thread_index;
-        uint key = key_index < element_count ? keys[key_index + in_offset] : 0xffffffff;
+        uint key = key_index < ec ? keys[key_index + in_offset] : 0xffffffff;
         local_keys[i] = key;
-        local_values[i] = key_index < element_count ? values[key_index + in_offset] : 0;
+        local_values[i] = key_index < ec ? values[key_index + in_offset] : 0;
 
         uint radix = bitfieldExtract(key, pass * 8, 8);
         local_radix[i] = radix;
@@ -177,7 +178,7 @@ void main() {
         uint key = local_histogram[i];
         uint radix = bitfieldExtract(key, pass * 8, 8);
         uint dst_offset = local_histogram_sum[radix] + i;
-        if (dst_offset < element_count) {
+        if (dst_offset < ec) {
             keys[dst_offset + out_offset] = key;
         }
 
@@ -194,7 +195,7 @@ void main() {
     for (uint i = index; i < PARTITION_SIZE; i += WORKGROUP_SIZE) {
         uint value = local_histogram[i];
         uint dst_offset = local_keys[i / WORKGROUP_SIZE];
-        if (dst_offset < element_count) {
+        if (dst_offset < ec) {
             values[dst_offset + out_offset] = value;
         }
     }

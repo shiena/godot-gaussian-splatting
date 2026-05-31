@@ -21,6 +21,7 @@ layout (local_size_x = WORKGROUP_SIZE) in;
 
 layout (std430, set = 0, binding = 0) restrict buffer Histogram {
     uint element_count;
+    uint sort_overflow_count;
     uint global_histogram[4*RADIX];                // (4, RADIX)
     uint parition_histogram[PARTITION_SIZE*RADIX]; // (PARTITION_SIZE, RADIX)
 };
@@ -38,8 +39,8 @@ void main() {
     uint index = subgroup_index * gl_SubgroupSize + thread_index;
     uint radix = gl_WorkGroupID.x;
 
-    uint element_count = element_count;
-    uint partition_count = (element_count + PARTITION_SIZE - 1) / PARTITION_SIZE;
+    uint ec = element_count;
+    uint partition_count = (ec + PARTITION_SIZE - 1) / PARTITION_SIZE;
 
     if (index == 0) reduction = 0;
     barrier();

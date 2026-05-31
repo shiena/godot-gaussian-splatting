@@ -19,7 +19,9 @@ enum DebugView {
 	GS_COLOR,
 	GS_DEPTH,
 	SCENE_DEPTH,
-	DEPTH_REJECT_MASK
+	DEPTH_REJECT_MASK,
+	EYE_TAG,            # Solid colour per eye (left=red, right=green) for multiview FB verification
+	GS_DEPTH_PER_EYE,   # GS depth tinted by eye (left=red ramp, right=green ramp)
 }
 
 enum CompositeMethod {
@@ -38,6 +40,8 @@ enum CompositeMethod {
 @export_range(0.0, 16.0, 0.5) var min_radius: float = 0.0
 ## Resolution scale for the gaussian splatting render pass. Lower values improve performance at the cost of sharpness.
 @export_range(0.25, 1.0, 0.05) var render_scale: float = 1.0
+## Enables verbose render-thread diagnostics for Quest/multiview debugging.
+@export var debug_logging := false
 @export_enum("Compositor", "Direct Texture") var display_mode: int:
 	set(value):
 		_display_mode = clampi(value, DisplayMode.COMPOSITOR, DisplayMode.DIRECT_TEXTURE)
@@ -45,7 +49,7 @@ enum CompositeMethod {
 			_queue_direct_texture_overlay_state(false, RID())
 	get:
 		return _display_mode
-@export_enum("Composite", "GS Alpha", "GS Color", "GS Depth", "Scene Depth", "Depth Reject Mask") var debug_view: int = DebugView.COMPOSITE
+@export_enum("Composite", "GS Alpha", "GS Color", "GS Depth", "Scene Depth", "Depth Reject Mask", "Eye Tag", "GS Depth Per Eye") var debug_view: int = DebugView.COMPOSITE
 ## Composite method. Auto selects Compute on Forward+ and Raster on Mobile.
 @export_enum("Auto", "Compute", "Raster") var composite_method: int = CompositeMethod.AUTO
 
@@ -68,6 +72,7 @@ var _overlay_sync_queued := false
 var _overlay_pending_visible := false
 var _overlay_pending_texture_rid := RID()
 const _DEBUG_TAG := "GDGS"
+var _resource_log_done: Dictionary = {}  # key: size Vector2i, value: true once logged
 
 func _init() -> void:
 	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
@@ -146,7 +151,7 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 		return
 
 	var view_count: int = scene_buffers.get_view_count()
-	var should_log := Engine.get_frames_drawn() % 60 == 0
+	var should_log := debug_logging and Engine.get_frames_drawn() % 60 == 0
 
 	if should_log:
 		var raw_cam_transform: Transform3D = scene_data.get_cam_transform()
@@ -195,7 +200,7 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 	var gs_scale := clampf(render_scale, 0.25, 1.0)
 	var gs_size := Vector2i(maxi(1, int(size.x * gs_scale)), maxi(1, int(size.y * gs_scale)))
 	var gsplat_result: Dictionary = manager.render_for_compositor_multiview(
-		gs_size, camera_data_array, _get_depth_capture_alpha(), sh_degree, min_radius
+		gs_size, camera_data_array, _get_depth_capture_alpha(), sh_degree, min_radius, debug_logging
 	)
 	var gsplat_views: Array = gsplat_result.get("views", [])
 	if gsplat_views.size() != view_count:
@@ -233,6 +238,8 @@ func _render_callback(_effect_callback_type: int, render_data: RenderData) -> vo
 # Composite: Compute path (Forward+)
 # ---------------------------------------------------------------------------
 func _composite_compute(view_count: int, gsplat_views: Array, scene_buffers: RenderSceneBuffersRD, camera_data_array: Array, size: Vector2i) -> void:
+	if debug_logging:
+		_log_resources_once("compute", view_count, scene_buffers, gsplat_views, size)
 	var x_groups: int = int(ceili(size.x / float(WORKGROUP_SIZE)))
 	var y_groups: int = int(ceili(size.y / float(WORKGROUP_SIZE)))
 
@@ -265,7 +272,7 @@ func _composite_compute(view_count: int, gsplat_views: Array, scene_buffers: Ren
 			depth_test_min_alpha,
 			float(debug_view),
 			1.0 if use_scene_depth else 0.0,
-			0.0
+			float(view)
 		] + _projection_to_column_major_floats(camera_data_array[view]["projection"].inverse()))
 
 		var scene_uniform := RDUniform.new()
@@ -310,6 +317,9 @@ func _composite_compute(view_count: int, gsplat_views: Array, scene_buffers: Ren
 # Composite: Raster path (Mobile-compatible)
 # ---------------------------------------------------------------------------
 func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: RenderSceneBuffersRD, camera_data_array: Array, size: Vector2i) -> void:
+	var log_fb := debug_logging and not _resource_log_done.has(size)
+	if debug_logging:
+		_log_resources_once("raster", view_count, scene_buffers, gsplat_views, size)
 	for view in view_count:
 		var gsplat_texture: RID = gsplat_views[view].get("color_alpha_texture", RID())
 		var gsplat_depth_texture: RID = gsplat_views[view].get("depth_texture", RID())
@@ -343,7 +353,7 @@ func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: Rend
 			depth_test_min_alpha,
 			float(debug_view),
 			1.0 if use_scene_depth else 0.0,
-			0.0
+			float(view)
 		] + _projection_to_column_major_floats(camera_data_array[view]["projection"].inverse()))
 
 		var gsplat_uniform := RDUniform.new()
@@ -371,6 +381,10 @@ func _composite_raster(view_count: int, gsplat_views: Array, scene_buffers: Rend
 		])
 
 		var fb: RID = rd.framebuffer_create([scene_tex])
+		if log_fb:
+			print("[%s] raster fb[view=%d] rid=%s scene_tex=%s fb_format=%d" % [
+				_DEBUG_TAG, view, str(fb), str(scene_tex), rd.framebuffer_get_format(fb)
+			])
 		var draw_list: int = rd.draw_list_begin(fb)
 		rd.draw_list_bind_render_pipeline(draw_list, raster_pipeline)
 		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
@@ -395,6 +409,14 @@ func _ensure_raster_pipeline(scene_tex: RID) -> void:
 	var fb: RID = rd.framebuffer_create([scene_tex])
 	var fb_format: int = rd.framebuffer_get_format(fb)
 	rd.free_rid(fb)
+	if debug_logging:
+		print("[%s] _ensure_raster_pipeline: pipeline created with fb_format=%d (scene_tex=%s)" % [_DEBUG_TAG, fb_format, str(scene_tex)])
+		var scene_fmt: RDTextureFormat = rd.texture_get_format(scene_tex)
+		if scene_fmt != null:
+			print("[%s]   scene_tex format=%d w=%d h=%d layers=%d usage=0x%X" % [
+				_DEBUG_TAG, scene_fmt.format, scene_fmt.width, scene_fmt.height,
+				scene_fmt.array_layers, scene_fmt.usage_bits
+			])
 
 	var blend := RDPipelineColorBlendStateAttachment.new()
 	blend.enable_blend = true
@@ -473,6 +495,47 @@ func _get_camera_data(scene_data: RenderSceneDataRD, view: int) -> Dictionary:
 		"projection": camera_projection,
 		"world_position": world_position
 	}
+
+func _log_texture_info(tag: String, rid: RID) -> void:
+	if rd == null:
+		return
+	if not rid.is_valid():
+		print("[%s] %s rid=INVALID" % [_DEBUG_TAG, tag])
+		return
+	var fmt: RDTextureFormat = rd.texture_get_format(rid)
+	if fmt == null:
+		print("[%s] %s rid=%s (texture_get_format returned null)" % [_DEBUG_TAG, tag, str(rid)])
+		return
+	print("[%s] %s rid=%s fmt=%d w=%d h=%d depth=%d layers=%d mips=%d type=%d samples=%d usage=0x%X" % [
+		_DEBUG_TAG, tag, str(rid),
+		fmt.format, fmt.width, fmt.height, fmt.depth, fmt.array_layers,
+		fmt.mipmaps, fmt.texture_type, fmt.samples, fmt.usage_bits
+	])
+
+func _log_resources_once(path_tag: String, view_count: int, scene_buffers: RenderSceneBuffersRD, gsplat_views: Array, size: Vector2i) -> void:
+	if _resource_log_done.has(size) or scene_buffers == null:
+		return
+	_resource_log_done[size] = true
+	print("[%s] === Resource snapshot (%s) size=%s view_count=%d ===" % [_DEBUG_TAG, path_tag, str(size), view_count])
+	for view in view_count:
+		var color_layer: RID = scene_buffers.get_color_layer(view) if scene_buffers.has_method("get_color_layer") else RID()
+		_log_texture_info("color_layer[%d]" % view, color_layer)
+		if scene_buffers.has_method("has_texture") and scene_buffers.has_method("get_texture_slice") and scene_buffers.has_texture("render_buffers", "color"):
+			var color_slice: RID = scene_buffers.get_texture_slice("render_buffers", "color", view, 0, 1, 1)
+			_log_texture_info("color_slice[%d]" % view, color_slice)
+		else:
+			print("[%s] color_slice[%d] not available (no render_buffers/color texture)" % [_DEBUG_TAG, view])
+		var depth_tex: RID = _get_scene_depth_texture(scene_buffers, view)
+		_log_texture_info("scene_depth[%d]" % view, depth_tex)
+		if view < gsplat_views.size():
+			var gv: Dictionary = gsplat_views[view]
+			_log_texture_info("gs_color[%d]" % view, gv.get("color_alpha_texture", RID()))
+			_log_texture_info("gs_depth[%d]" % view, gv.get("depth_texture", RID()))
+	if scene_buffers.has_method("get_view_count"):
+		print("[%s] scene_buffers.get_view_count()=%d" % [_DEBUG_TAG, scene_buffers.get_view_count()])
+	if scene_buffers.has_method("get_internal_size"):
+		print("[%s] scene_buffers.get_internal_size()=%s" % [_DEBUG_TAG, str(scene_buffers.get_internal_size())])
+	print("[%s] === Resource snapshot end ===" % _DEBUG_TAG)
 
 func _get_scene_depth_texture(scene_buffers: RenderSceneBuffersRD, view: int) -> RID:
 	if scene_buffers == null:
